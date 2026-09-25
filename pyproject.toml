@@ -1,0 +1,67 @@
+# uv workspace root. Not a package itself: it pins ONE lockfile (uv.lock) for
+# every Python service, so all images resolve identical dependency versions.
+[project]
+name = "commerce-agent"
+version = "0.1.0"
+description = "Conversational commerce & checkout agent (monorepo root)"
+requires-python = ">=3.13"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "services/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.0",
+    "hypothesis>=6",
+    "httpx>=0.28",
+    "testcontainers[postgres]>=4",
+    "ruff>=0.12",
+    "mypy>=1.17",
+]
+
+# ---------------------------------------------------------------------------
+# Quality gates (shared by every package)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "ASYNC", "RUF", "PT", "SIM", "TID"]
+ignore = [
+    "S101",   # assert is fine (tests, internal invariants)
+    "RUF001", "RUF002", "RUF003",  # intentional typography in copy/docs: × − → ≥ £
+    "N818",   # HTTP-style error names (NotFound, Conflict) read better than NotFoundError
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["commerce_common", "commerce_svc", "agent_svc", "gateway_svc", "checkout_svc", "fulfillment_svc"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S105", "S106", "S107", "PT018", "RUF015"] # fake secrets, compact asserts in tests
+"**/migrations/**" = ["E501"]
+"**/seed.py" = ["E501"]   # tabular demo data
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+exclude = ["migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["libs", "services"]
+# Each service's test kit has a unique module name, so suites can be collected together.
+pythonpath = ["services/agent/tests", "services/checkout/tests", "services/commerce/tests", "services/fulfillment/tests", "services/gateway/tests"]
+addopts = "--import-mode=importlib"

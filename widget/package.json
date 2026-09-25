@@ -1,0 +1,44 @@
+{
+  "name": "@commerce-agent/chat-widget",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Embeddable conversational commerce chat widget (React + Redux Toolkit + Tailwind, Shadow DOM).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@reduxjs/toolkit": "^2.12.0",
+    "clsx": "^2.1.1",
+    "eventsource-parser": "^4.1.1",
+    "lucide-react": "^1.48.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-redux": "^9.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^29.1.1",
+    "msw": "^2.15.0",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.1"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

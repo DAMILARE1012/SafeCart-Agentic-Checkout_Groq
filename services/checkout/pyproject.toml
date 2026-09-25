@@ -1,0 +1,28 @@
+[project]
+name = "checkout-svc"
+version = "0.1.0"
+description = "Confirmations, orders, Stripe payments & webhooks, audit log. The only service holding Stripe secrets."
+requires-python = ">=3.13"
+dependencies = [
+    "commerce-common",
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+    "sqlalchemy[asyncio]>=2.0.41",
+    "asyncpg>=0.30",
+    "alembic>=1.16",
+    "httpx>=0.28",
+    "tenacity>=9.1",
+    "stripe>=15",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+]
+
+[tool.uv.sources]
+commerce-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/checkout_svc"]

@@ -1,0 +1,25 @@
+[project]
+name = "commerce-common"
+version = "0.1.0"
+description = "Shared building blocks for every service: money, settings, errors, auth, db, observability, app factory."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.116",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+    "sqlalchemy[asyncio]>=2.0.41",
+    "structlog>=25.4",
+    "faststream[rabbit]>=0.7",
+    "opentelemetry-sdk>=1.35",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.35",
+    "opentelemetry-instrumentation-fastapi>=0.56b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.56b0",
+    "opentelemetry-instrumentation-httpx>=0.56b0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/commerce_common"]

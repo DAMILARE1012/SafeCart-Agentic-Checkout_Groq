@@ -1,0 +1,27 @@
+[project]
+name = "gateway-svc"
+version = "0.1.0"
+description = "Channel gateway / BFF: widget sessions + SSE, Telegram bot, confirmation click-through."
+requires-python = ">=3.13"
+dependencies = [
+    "commerce-common",
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+    "httpx>=0.28",
+    "httpx-sse>=0.4",
+    "redis>=6",
+    "pyjwt>=2.10",
+    "python-telegram-bot>=22",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+]
+
+[tool.uv.sources]
+commerce-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gateway_svc"]

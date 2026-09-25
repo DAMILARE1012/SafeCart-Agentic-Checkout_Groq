@@ -1,0 +1,562 @@
+# =============================================================================
+# Conversational Commerce & Checkout Agent: local topology
+# -----------------------------------------------------------------------------
+#   docker compose up -d                                  # core infra only
+#   docker compose --profile app up -d --build            # + all services (ordered startup)
+#   docker compose --profile observability up -d          # + OTel, Jaeger, Prometheus, Grafana
+#   docker compose --profile dev-tools up -d stripe-cli   # + Stripe webhook forwarding
+#
+# All values come from `.env` (see .env.example). Every container receives ONLY
+# the variables listed under its `environment:` key: never a shared env_file.
+#
+# Startup order (depends_on + healthchecks), see docs/SYSTEM_DESIGN.md §3.6:
+#   tier 0  postgres, redis, rabbitmq
+#   tier 1  *-migrate (one-shot; must exit 0)
+#   tier 2  commerce-api, commerce-worker, fulfillment-worker
+#   tier 3  checkout-api, checkout-worker
+#   tier 4  agent-api
+#   tier 5  gateway-api
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Reusable fragments
+# ---------------------------------------------------------------------------
+x-common-env: &common-env
+  APP_ENV: ${APP_ENV}
+  LOG_LEVEL: ${LOG_LEVEL}
+  LOG_FORMAT: ${LOG_FORMAT}
+  DEFAULT_MERCHANT_ID: ${DEFAULT_MERCHANT_ID}
+  OTEL_ENABLED: ${OTEL_ENABLED}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+  METRICS_ENABLED: ${METRICS_ENABLED}
+
+x-messaging-env: &messaging-env
+  RABBITMQ_URL: ${RABBITMQ_URL}
+  EVENTS_EXCHANGE: ${EVENTS_EXCHANGE}
+  EVENTS_DLX: ${EVENTS_DLX}
+  EVENT_MAX_DELIVERY_ATTEMPTS: ${EVENT_MAX_DELIVERY_ATTEMPTS}
+  EVENT_RETRY_DELAYS_SECONDS: ${EVENT_RETRY_DELAYS_SECONDS}
+  OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE}
+
+x-db-pool-env: &db-pool-env
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW}
+
+x-internal-http-env: &internal-http-env
+  INTERNAL_HTTP_TIMEOUT_SECONDS: ${INTERNAL_HTTP_TIMEOUT_SECONDS}
+  INTERNAL_HTTP_MAX_RETRIES: ${INTERNAL_HTTP_MAX_RETRIES}
+
+x-api-healthcheck: &api-healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+  interval: 10s
+  timeout: 3s
+  retries: 6
+  start_period: 20s
+
+x-worker-healthcheck: &worker-healthcheck
+  test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['WORKER_HEALTH_PORT']}/health\", timeout=2)"]
+  interval: 15s
+  timeout: 3s
+  retries: 4
+  start_period: 20s
+
+x-build-args: &build-args
+  PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+  UV_IMAGE: ${UV_IMAGE}
+
+x-app-defaults: &app-defaults
+  profiles: [app]
+  restart: unless-stopped
+  init: true                     # PID 1 signal handling / zombie reaping
+  read_only: true                # immutable container filesystem
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  networks: [backend]
+
+x-migrate-defaults: &migrate-defaults
+  profiles: [app]
+  restart: "no"
+  networks: [backend]
+
+# ---- one build definition per service (api/worker/migrate share the image)
+x-gateway-build: &gateway-build
+  image: ${COMPOSE_PROJECT_NAME}/gateway-svc:dev
+  build: { context: ., dockerfile: docker/python-service.Dockerfile, args: { <<: *build-args, SERVICE: gateway } }
+x-agent-build: &agent-build
+  image: ${COMPOSE_PROJECT_NAME}/agent-svc:dev
+  build: { context: ., dockerfile: docker/python-service.Dockerfile, args: { <<: *build-args, SERVICE: agent } }
+x-commerce-build: &commerce-build
+  image: ${COMPOSE_PROJECT_NAME}/commerce-svc:dev
+  build: { context: ., dockerfile: docker/python-service.Dockerfile, args: { <<: *build-args, SERVICE: commerce } }
+x-checkout-build: &checkout-build
+  image: ${COMPOSE_PROJECT_NAME}/checkout-svc:dev
+  build: { context: ., dockerfile: docker/python-service.Dockerfile, args: { <<: *build-args, SERVICE: checkout } }
+x-fulfillment-build: &fulfillment-build
+  image: ${COMPOSE_PROJECT_NAME}/fulfillment-svc:dev
+  build: { context: ., dockerfile: docker/python-service.Dockerfile, args: { <<: *build-args, SERVICE: fulfillment } }
+
+# ---- per-service environment (least privilege)
+x-commerce-env: &commerce-env
+  <<: [*common-env, *messaging-env, *db-pool-env]
+  OTEL_SERVICE_NAME: commerce-svc
+  DATABASE_URL: ${COMMERCE_DATABASE_URL}
+  REDIS_URL: ${COMMERCE_REDIS_URL}
+  WORKER_HEALTH_PORT: ${WORKER_HEALTH_PORT}
+  AGENT_SVC_API_KEY_HASH: ${AGENT_SVC_API_KEY_HASH}
+  CHECKOUT_SVC_API_KEY_HASH: ${CHECKOUT_SVC_API_KEY_HASH}
+  DEFAULT_CURRENCY: ${DEFAULT_CURRENCY}
+  SUPPORTED_CURRENCIES: ${SUPPORTED_CURRENCIES}
+  PRICING_FX_FALLBACK_ENABLED: ${PRICING_FX_FALLBACK_ENABLED}
+  FX_PROVIDER: ${FX_PROVIDER}
+  FX_API_URL: ${FX_API_URL}
+  FX_API_KEY: ${FX_API_KEY}
+  FX_RATE_TTL_MINUTES: ${FX_RATE_TTL_MINUTES}
+  FX_MAX_RATE_AGE_MINUTES: ${FX_MAX_RATE_AGE_MINUTES}
+  TAX_PROVIDER: ${TAX_PROVIDER}
+  TAX_DEFAULT_BEHAVIOR: ${TAX_DEFAULT_BEHAVIOR}
+  MERCHANT_ORIGIN_COUNTRY: ${MERCHANT_ORIGIN_COUNTRY}
+  STRIPE_TAX_API_KEY: ${STRIPE_TAX_API_KEY}
+  QUOTE_TTL_MINUTES: ${QUOTE_TTL_MINUTES}
+  INVENTORY_RESERVATION_TTL_MINUTES: ${INVENTORY_RESERVATION_TTL_MINUTES}
+  MAX_ITEM_QUANTITY: ${MAX_ITEM_QUANTITY}
+  FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY}
+
+x-checkout-env: &checkout-env
+  <<: [*common-env, *messaging-env, *db-pool-env, *internal-http-env]
+  OTEL_SERVICE_NAME: checkout-svc
+  MERCHANT_NAME: ${MERCHANT_NAME}
+  DATABASE_URL: ${CHECKOUT_DATABASE_URL}
+  REDIS_URL: ${CHECKOUT_REDIS_URL}
+  WORKER_HEALTH_PORT: ${WORKER_HEALTH_PORT}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+  COMMERCE_SERVICE_URL: ${COMMERCE_SERVICE_URL}
+  SERVICE_API_KEY: ${CHECKOUT_SVC_API_KEY}
+  GATEWAY_SVC_API_KEY_HASH: ${GATEWAY_SVC_API_KEY_HASH}
+  AGENT_SVC_API_KEY_HASH: ${AGENT_SVC_API_KEY_HASH}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}            # only checkout-svc receives this
+  STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+  STRIPE_API_VERSION: ${STRIPE_API_VERSION}
+  STRIPE_WEBHOOK_TOLERANCE_SECONDS: ${STRIPE_WEBHOOK_TOLERANCE_SECONDS}
+  STRIPE_MAX_NETWORK_RETRIES: ${STRIPE_MAX_NETWORK_RETRIES}
+  CHECKOUT_MODE: ${CHECKOUT_MODE}
+  CHECKOUT_SUCCESS_PATH: ${CHECKOUT_SUCCESS_PATH}
+  CHECKOUT_CANCEL_PATH: ${CHECKOUT_CANCEL_PATH}
+  CHECKOUT_SESSION_EXPIRY_MINUTES: ${CHECKOUT_SESSION_EXPIRY_MINUTES}
+  CONFIRMATION_TOKEN_TTL_MINUTES: ${CONFIRMATION_TOKEN_TTL_MINUTES}
+  ORDER_CREATED_STALE_SECONDS: ${ORDER_CREATED_STALE_SECONDS}
+  MAX_ORDER_TOTAL_MINOR: ${MAX_ORDER_TOTAL_MINOR}
+  COMPENSATION_AUTO_REFUND_ENABLED: ${COMPENSATION_AUTO_REFUND_ENABLED}
+  RECONCILIATION_ENABLED: ${RECONCILIATION_ENABLED}
+  RECONCILIATION_CRON: ${RECONCILIATION_CRON}
+  RECONCILIATION_LOOKBACK_HOURS: ${RECONCILIATION_LOOKBACK_HOURS}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+
+x-fulfillment-env: &fulfillment-env
+  <<: [*common-env, *messaging-env, *db-pool-env]
+  OTEL_SERVICE_NAME: fulfillment-svc
+  DATABASE_URL: ${FULFILLMENT_DATABASE_URL}
+  WORKER_HEALTH_PORT: ${WORKER_HEALTH_PORT}
+  FULFILLMENT_PROVIDER: ${FULFILLMENT_PROVIDER}
+  FULFILLMENT_API_URL: ${FULFILLMENT_API_URL}
+  FULFILLMENT_API_KEY: ${FULFILLMENT_API_KEY}
+  FULFILLMENT_TIMEOUT_SECONDS: ${FULFILLMENT_TIMEOUT_SECONDS}
+  FULFILLMENT_MAX_RETRIES: ${FULFILLMENT_MAX_RETRIES}
+  FULFILLMENT_MOCK_FAILURE_RATE: ${FULFILLMENT_MOCK_FAILURE_RATE}
+  FULFILLMENT_MOCK_LATENCY_MS: ${FULFILLMENT_MOCK_LATENCY_MS}
+  FULFILLMENT_MOCK_FAIL_SKUS: ${FULFILLMENT_MOCK_FAIL_SKUS}
+
+services:
+  # ===========================================================================
+  # Tier 0: core infrastructure (default profile)
+  # ===========================================================================
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: postgres
+      # consumed by infra/postgres/init/01-create-service-databases.sh
+      COMMERCE_DB_NAME: ${COMMERCE_DB_NAME}
+      COMMERCE_DB_USER: ${COMMERCE_DB_USER}
+      COMMERCE_DB_PASSWORD: ${COMMERCE_DB_PASSWORD}
+      CHECKOUT_DB_NAME: ${CHECKOUT_DB_NAME}
+      CHECKOUT_DB_USER: ${CHECKOUT_DB_USER}
+      CHECKOUT_DB_PASSWORD: ${CHECKOUT_DB_PASSWORD}
+      FULFILLMENT_DB_NAME: ${FULFILLMENT_DB_NAME}
+      FULFILLMENT_DB_USER: ${FULFILLMENT_DB_USER}
+      FULFILLMENT_DB_PASSWORD: ${FULFILLMENT_DB_PASSWORD}
+      AGENT_DB_NAME: ${AGENT_DB_NAME}
+      AGENT_DB_USER: ${AGENT_DB_USER}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql          # PG 18+ image layout
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  redis:
+    image: ${REDIS_IMAGE}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE}
+    restart: unless-stopped
+    hostname: rabbitmq                        # stable node name → persistent data survives restarts
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_HOST_PORT}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_HOST_PORT}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  traefik:
+    image: ${TRAEFIK_IMAGE}
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false   # services opt in via labels
+      - --providers.docker.network=commerce-edge
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+      - --api.insecure=true                         # dev only: dashboard on :8080
+      - --ping=true
+      - --accesslog=true
+      - --metrics.prometheus=true
+    ports:
+      - "${TRAEFIK_HTTP_PORT}:80"
+      - "127.0.0.1:${TRAEFIK_DASHBOARD_PORT}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [edge, backend]
+
+  # ===========================================================================
+  # Tier 1: schema migrations (one-shot, profile: app)
+  # Run once per deploy BEFORE any replica starts, so replicas never race.
+  # ===========================================================================
+  commerce-migrate:
+    <<: [*migrate-defaults, *commerce-build]
+    command: ["python", "-m", "commerce_svc.migrate"]
+    environment: { <<: *common-env, DATABASE_URL: "${COMMERCE_DATABASE_URL}" }
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  commerce-seed:                                   # demo catalog/prices/tax/promos (business data, not config)
+    <<: [*migrate-defaults, *commerce-build]
+    command: ["python", "-m", "commerce_svc.seed"]
+    environment: *commerce-env
+    depends_on:
+      commerce-migrate: { condition: service_completed_successfully }
+
+  checkout-migrate:
+    <<: [*migrate-defaults, *checkout-build]
+    command: ["python", "-m", "checkout_svc.migrate"]
+    environment: { <<: *common-env, DATABASE_URL: "${CHECKOUT_DATABASE_URL}" }
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  fulfillment-migrate:
+    <<: [*migrate-defaults, *fulfillment-build]
+    command: ["python", "-m", "fulfillment_svc.migrate"]
+    environment: { <<: *common-env, DATABASE_URL: "${FULFILLMENT_DATABASE_URL}" }
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  agent-migrate:                                   # own tables + LangGraph checkpointer.setup()
+    <<: [*migrate-defaults, *agent-build]
+    command: ["python", "-m", "agent_svc.migrate"]
+    environment: { <<: *common-env, DATABASE_URL: "${AGENT_DATABASE_URL}" }
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # ===========================================================================
+  # Tier 2: services with no upstream service dependencies (profile: app)
+  # ===========================================================================
+  commerce-api:
+    <<: [*app-defaults, *commerce-build]
+    command: ["uvicorn", "commerce_svc.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment: *commerce-env
+    healthcheck: *api-healthcheck
+    depends_on:
+      commerce-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  commerce-worker:                                 # outbox relay, event consumers, expiry sweeper
+    <<: [*app-defaults, *commerce-build]
+    command: ["python", "-m", "commerce_svc.worker"]
+    environment: *commerce-env
+    healthcheck: *worker-healthcheck
+    depends_on:
+      commerce-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  fulfillment-worker:                              # consumes order.paid, publishes fulfillment.*
+    <<: [*app-defaults, *fulfillment-build]
+    command: ["python", "-m", "fulfillment_svc.worker"]
+    environment: *fulfillment-env
+    healthcheck: *worker-healthcheck
+    depends_on:
+      fulfillment-migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+
+  # ===========================================================================
+  # Tier 3: checkout (needs commerce for quote lock) (profile: app)
+  # ===========================================================================
+  checkout-api:
+    <<: [*app-defaults, *checkout-build]
+    command: ["uvicorn", "checkout_svc.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment: *checkout-env
+    healthcheck: *api-healthcheck
+    depends_on:
+      checkout-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      commerce-api: { condition: service_healthy }
+    labels:                                        # ONLY the Stripe webhook route is public
+      - traefik.enable=true
+      - traefik.http.routers.stripe-webhook.rule=Path(`/webhooks/stripe`)
+      - traefik.http.routers.stripe-webhook.entrypoints=web
+      - traefik.http.services.checkout.loadbalancer.server.port=8000
+    networks: [edge, backend]
+
+  checkout-worker:                                 # webhook inbox, outbox relay, saga, reconciliation
+    <<: [*app-defaults, *checkout-build]
+    command: ["python", "-m", "checkout_svc.worker"]
+    environment: *checkout-env
+    healthcheck: *worker-healthcheck
+    depends_on:
+      checkout-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  # ===========================================================================
+  # Tier 4: agent (tools call commerce; order status from checkout) (profile: app)
+  # ===========================================================================
+  agent-api:
+    <<: [*app-defaults, *agent-build]
+    command: ["uvicorn", "agent_svc.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment:
+      <<: [*common-env, *internal-http-env]
+      OTEL_SERVICE_NAME: agent-svc
+      DATABASE_URL: ${AGENT_DATABASE_URL}
+      REDIS_URL: ${AGENT_REDIS_URL}
+      COMMERCE_SERVICE_URL: ${COMMERCE_SERVICE_URL}
+      CHECKOUT_SERVICE_URL: ${CHECKOUT_SERVICE_URL}
+      SERVICE_API_KEY: ${AGENT_SVC_API_KEY}
+      GATEWAY_SVC_API_KEY_HASH: ${GATEWAY_SVC_API_KEY_HASH}
+      GROQ_API_KEY: ${GROQ_API_KEY}                # only agent-svc receives this
+      GROQ_BASE_URL: ${GROQ_BASE_URL}
+      GROQ_MODEL_PRIMARY: ${GROQ_MODEL_PRIMARY}
+      GROQ_MODEL_FALLBACK: ${GROQ_MODEL_FALLBACK}
+      GROQ_MODEL_GUARD: ${GROQ_MODEL_GUARD}
+      GROQ_TEMPERATURE: ${GROQ_TEMPERATURE}
+      GROQ_MAX_TOKENS: ${GROQ_MAX_TOKENS}
+      GROQ_TIMEOUT_SECONDS: ${GROQ_TIMEOUT_SECONDS}
+      GROQ_MAX_RETRIES: ${GROQ_MAX_RETRIES}
+      LANGGRAPH_CHECKPOINTER: ${LANGGRAPH_CHECKPOINTER}
+      AGENT_RECURSION_LIMIT: ${AGENT_RECURSION_LIMIT}
+      AGENT_TURN_TIMEOUT_SECONDS: ${AGENT_TURN_TIMEOUT_SECONDS}
+      AGENT_HISTORY_MAX_MESSAGES: ${AGENT_HISTORY_MAX_MESSAGES}
+      AGENT_PROMPT_VERSION: ${AGENT_PROMPT_VERSION}
+      GUARDRAIL_INPUT_CLASSIFIER_ENABLED: ${GUARDRAIL_INPUT_CLASSIFIER_ENABLED}
+      GUARDRAIL_OUTPUT_AMOUNT_VALIDATION_ENABLED: ${GUARDRAIL_OUTPUT_AMOUNT_VALIDATION_ENABLED}
+      GUARDRAIL_MAX_REGENERATIONS: ${GUARDRAIL_MAX_REGENERATIONS}
+      GUARDRAIL_INJECTION_THRESHOLD: ${GUARDRAIL_INJECTION_THRESHOLD}
+      TRANSCRIPT_RETENTION_DAYS: ${TRANSCRIPT_RETENTION_DAYS}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT}
+    healthcheck: *api-healthcheck
+    depends_on:
+      agent-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      commerce-api: { condition: service_healthy }
+      checkout-api: { condition: service_healthy }
+
+  # ===========================================================================
+  # Tier 5: gateway (entry point; needs agent + checkout) (profile: app)
+  # ===========================================================================
+  gateway-api:
+    <<: [*app-defaults, *gateway-build]
+    command: ["uvicorn", "gateway_svc.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment:
+      <<: [*common-env, *internal-http-env]
+      OTEL_SERVICE_NAME: gateway-svc
+      REDIS_URL: ${GATEWAY_REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}                # consumes order.* for user notifications
+      EVENTS_EXCHANGE: ${EVENTS_EXCHANGE}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      MERCHANT_NAME: ${MERCHANT_NAME}
+      MERCHANT_LOGO_URL: ${MERCHANT_LOGO_URL}
+      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY}
+      SUPPORTED_CURRENCIES: ${SUPPORTED_CURRENCIES}
+      AGENT_SERVICE_URL: ${AGENT_SERVICE_URL}
+      CHECKOUT_SERVICE_URL: ${CHECKOUT_SERVICE_URL}
+      SERVICE_API_KEY: ${GATEWAY_SVC_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      JWT_SESSION_TTL_MINUTES: ${JWT_SESSION_TTL_MINUTES}
+      WIDGET_PUBLISHABLE_KEY: ${WIDGET_PUBLISHABLE_KEY}
+      WIDGET_ALLOWED_ORIGINS: ${WIDGET_ALLOWED_ORIGINS}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES}
+      RATE_LIMIT_MESSAGES_PER_MINUTE: ${RATE_LIMIT_MESSAGES_PER_MINUTE}
+      RATE_LIMIT_CHECKOUTS_PER_HOUR: ${RATE_LIMIT_CHECKOUTS_PER_HOUR}
+      RATE_LIMIT_IP_REQUESTS_PER_MINUTE: ${RATE_LIMIT_IP_REQUESTS_PER_MINUTE}
+      IDEMPOTENCY_TTL_HOURS: ${IDEMPOTENCY_TTL_HOURS}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}    # only gateway-svc receives this
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL}
+      TELEGRAM_UPDATE_MODE: ${TELEGRAM_UPDATE_MODE}
+      TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+      TELEGRAM_ALLOWED_UPDATES: ${TELEGRAM_ALLOWED_UPDATES}
+    healthcheck: *api-healthcheck
+    depends_on:
+      redis: { condition: service_healthy }
+      agent-api: { condition: service_healthy }
+      checkout-api: { condition: service_healthy }
+      # rabbitmq (order events) joins here in M4
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.gateway.rule=PathPrefix(`/v1`) || PathPrefix(`/checkout`) || Path(`/telegram/webhook`)
+      - traefik.http.routers.gateway.entrypoints=web
+      - traefik.http.services.gateway.loadbalancer.server.port=8000
+    networks: [edge, backend]
+
+  # ===========================================================================
+  # Chat widget: static bundle served at /widget/commerce-chat.js (profile: app)
+  # ===========================================================================
+  widget:
+    image: ${COMPOSE_PROJECT_NAME}/widget:dev
+    build:
+      context: ./widget
+      args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
+        NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE}
+        VITE_GATEWAY_BASE_URL: ${VITE_GATEWAY_BASE_URL}
+    profiles: [app]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.widget.rule=PathPrefix(`/widget`)
+      - traefik.http.routers.widget.entrypoints=web
+      - traefik.http.services.widget.loadbalancer.server.port=80
+    networks: [edge]
+
+  # ===========================================================================
+  # Observability (profile: observability)
+  # ===========================================================================
+  otel-collector:
+    image: ${OTEL_COLLECTOR_IMAGE}
+    profiles: [observability]
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./infra/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on: [jaeger]
+    networks: [backend]
+
+  jaeger:
+    image: ${JAEGER_IMAGE}
+    profiles: [observability]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${JAEGER_UI_HOST_PORT}:16686"
+    networks: [backend]
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    profiles: [observability]
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT}:9090"
+    networks: [backend]
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    profiles: [observability]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT}:3000"
+    depends_on: [prometheus]
+    networks: [backend]
+
+  # ===========================================================================
+  # Dev tools (profile: dev-tools)
+  # ===========================================================================
+  stripe-cli:
+    image: ${STRIPE_CLI_IMAGE}
+    profiles: [dev-tools]
+    environment:
+      STRIPE_API_KEY: ${STRIPE_SECRET_KEY}
+    command:
+      - listen
+      - --forward-to
+      - http://checkout-api:8000/webhooks/stripe
+      - --events
+      - checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed
+    networks: [backend]
+
+networks:
+  edge:
+    name: commerce-edge
+  backend:
+    name: commerce-backend
+
+volumes:
+  pg-data:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

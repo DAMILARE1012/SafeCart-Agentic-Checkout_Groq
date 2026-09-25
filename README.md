@@ -1,0 +1,220 @@
+# Conversational Commerce & Checkout Agent
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![LangGraph](https://img.shields.io/badge/LangGraph-Groq-F55036)
+![Stripe](https://img.shields.io/badge/Stripe-test%20mode-635BFF?logo=stripe&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+
+An AI shopping assistant that any online store can embed with one `<script>` tag. Shoppers chat to find
+products, build a cart, apply promo codes and pay through Stripe, without leaving the page.
+
+**The problem it solves:** letting an LLM take part in a purchase is risky. Models can get prices wrong,
+invent discounts, or trigger a charge nobody approved. In this project the agent **can only suggest
+actions**. Prices, tax and currency conversion come from the backend. A charge happens only after the
+shopper clicks **Confirm & pay**. Every step that involves money is idempotent, driven by Stripe
+webhooks, and recorded in an audit log that can't be edited.
+
+**Who it's for:** engineers building agentic or payment systems, and anyone who wants a reference for
+running an LLM safely next to real money.
+
+## Screenshots
+
+| Browse by chatting | Confirm an exact, server-priced quote | Track the order to completion |
+|:---:|:---:|:---:|
+| <img src="docs/images/widget-browse.png" width="260" alt="The assistant showing running shoes as product cards"> | <img src="docs/images/widget-confirm.png" width="260" alt="An order summary with a promo discount, tax and a Confirm and pay button"> | <img src="docs/images/widget-order.png" width="260" alt="An order tracker showing Confirmed, Payment, Preparing and Complete"> |
+
+## How it works
+
+```mermaid
+flowchart LR
+    shopper([Shopper]) --> widget["Chat widget<br/>React · Shadow DOM"]
+    widget -- "HTTPS + SSE" --> gateway["gateway-svc<br/>sessions · rate limits"]
+    gateway -- "chat turns" --> agent["agent-svc<br/>LangGraph + Groq"]
+    agent -- "tool calls" --> commerce["commerce-svc<br/>catalog · carts · pricing · tax"]
+    agent -. "read-only order status" .-> checkout
+    gateway -- "Confirm & pay<br/>(shopper click only)" --> checkout["checkout-svc<br/>orders · payments · audit"]
+    checkout -- "lock quote · commit stock" --> commerce
+    checkout -- "Checkout Session<br/>+ idempotency key" --> stripe[(Stripe)]
+    stripe -- "signed webhooks" --> checkout
+    checkout <-->|"events via RabbitMQ<br/>(outbox / inbox)"| fulfillment["fulfillment-svc<br/>warehouse worker"]
+```
+
+Order status changes only when Stripe or the warehouse reports something, never because the model says so:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> CREATED: Confirm & pay
+    CREATED --> AWAITING_PAYMENT: Stripe session
+    AWAITING_PAYMENT --> PAID: webhook
+    AWAITING_PAYMENT --> EXPIRED: webhook (stock released)
+    PAID --> FULFILLED: fulfillment.succeeded
+    PAID --> FULFILLMENT_FAILED: fulfillment.failed
+```
+
+**What the design guarantees:**
+
+- **The agent can't charge anyone.** The model sees only the tools allowed at each step. It never gets a
+  payment tool. A charge needs a single-use confirmation grant that only the shopper's click can redeem.
+- **Correct amounts.** Every price in a reply is checked against backend data. The Stripe amount equals
+  the confirmed quote, to the cent.
+- **No double charges or double shipments.** Payments use deterministic idempotency keys
+  (`pay:{order_id}:v1`), webhooks are de-duplicated by event id, and each event is processed once.
+- **No lost events.** Events are written in the same database transaction as the state change, then
+  published. Messages that keep failing go to a dead-letter queue instead of being dropped.
+- **Tamper-evident history.** The audit log is hash-chained, and a database trigger blocks updates and
+  deletes.
+- **Guarded input and output.** Llama Prompt Guard screens messages for prompt injection. Replies are
+  checked for prices and addresses that don't come from the backend or the shopper.
+
+The full architecture is in [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md).
+
+## Tech stack
+
+| Area | Tools |
+|---|---|
+| Agent / LLM | LangGraph, LangChain-Groq (`gpt-oss-120b`, fallback `qwen3.8-27b`), Llama Prompt Guard 2 |
+| Backend | Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2 (async), Alembic |
+| Payments | Stripe Checkout, signed webhooks, Stripe CLI for local forwarding |
+| Data & messaging | PostgreSQL 18 (one database per service), Redis 8, RabbitMQ 4 (quorum queues) via FastStream |
+| Frontend widget | React 19, Redux Toolkit, Tailwind CSS 4, TypeScript, Vite, Shadow DOM web component |
+| Infrastructure | Docker (multi-stage, non-root images), Docker Compose, Traefik 3 |
+| Quality | pytest + Testcontainers, Vitest + MSW, ruff, mypy (strict), GitHub Actions |
+| Observability (optional) | OpenTelemetry, Prometheus, Grafana, Jaeger, structlog |
+
+## Getting started
+
+### Try the widget in one minute (no keys, no Docker)
+
+The widget ships with a scripted mock backend, so you can try the UI on its own:
+
+```bash
+cd widget
+npm ci
+npm run dev          # open http://localhost:5173
+```
+
+### Run the full system
+
+**Prerequisites:** Docker Desktop, Python 3.13+, Node 22+, [uv](https://docs.astral.sh/uv/), a free
+[Groq API key](https://console.groq.com/keys) and a [Stripe test-mode account](https://dashboard.stripe.com/test/apikeys).
+
+1. **Clone the repo and create your `.env`.** The script generates every internal password, key and
+   secret:
+
+   ```bash
+   git clone <repo-url> && cd <repo-folder>
+   python scripts/init_env.py
+   ```
+
+2. **Add your own keys to `.env`:** `GROQ_API_KEY`, `STRIPE_SECRET_KEY` (`sk_test_…`) and
+   `STRIPE_PUBLISHABLE_KEY` (`pk_test_…`). Set `VITE_USE_MOCKS=false` so the widget talks to the real
+   backend.
+
+3. **Get the webhook signing secret** and paste it into `.env` as `STRIPE_WEBHOOK_SECRET`:
+
+   ```bash
+   docker compose --profile dev-tools run --rm stripe-cli listen --print-secret
+   ```
+
+4. **Start everything.** This runs migrations, seeds a demo catalog and starts all services:
+
+   ```bash
+   docker compose --profile app --profile dev-tools up -d --build
+   docker compose ps    # wait until the services show "healthy"
+   ```
+
+5. **Open the widget:**
+
+   ```bash
+   cd widget && npm ci && npm run dev    # http://localhost:5173
+   ```
+
+| URL | What |
+|---|---|
+| http://localhost:5173 | Demo storefront with the widget (dev server) |
+| http://localhost:8088 | Public entry point (Traefik → gateway, widget bundle) |
+| http://localhost:15672 | RabbitMQ management UI |
+
+Add `--profile observability` to the `up` command to also start Grafana (http://localhost:3001) and
+Jaeger (http://localhost:16686).
+
+## Usage
+
+### Shop by chatting
+
+Try messages like:
+
+```text
+Show me running shoes
+Add the Trail Runner GTX to my cart
+Apply WELCOME10
+Check out and ship to 1 Main St, Austin, TX 78701, USA
+Where is my order?
+```
+
+Press **Confirm & pay** and pay on Stripe's test page with card **4242 4242 4242 4242**, any future
+expiry date and any CVC. The order tracker moves through *Payment received → Preparing → Complete*
+within a few seconds.
+
+### Embed it in your store
+
+Serve the built bundle and add one tag to any page whose origin is listed in `WIDGET_ALLOWED_ORIGINS`:
+
+```html
+<script src="http://localhost:8088/widget/commerce-chat.js"
+        data-publishable-key="pk_widget_demo_123"
+        data-gateway-url="http://localhost:8088"
+        data-brand-color="#0f766e" async></script>
+```
+
+Other options: `data-theme` (`light`/`dark`), `data-position` (`left`/`right`), `data-open-on-load`,
+`data-merchant-name`. You can also control it from JavaScript:
+
+```js
+window.CommerceChat.open();
+window.CommerceChat.close();
+```
+
+### Run the tests
+
+```bash
+uv sync --all-packages
+uv run pytest                    # Python services (Docker required: Testcontainers starts PostgreSQL)
+uv run ruff check . && uv run mypy libs/common/src services/*/src
+cd widget && npm test            # widget unit tests
+```
+
+## Project structure
+
+```text
+├── libs/common/          Shared Python library: money, auth, events, outbox/inbox messaging
+├── services/
+│   ├── gateway/          Public API for the widget: sessions, SSE streaming, rate limits
+│   ├── agent/            LangGraph agent, Groq models, tools, guardrails
+│   ├── commerce/         Catalog, carts, pricing, promotions, tax, stock reservations
+│   ├── checkout/         Confirmations, orders, Stripe, webhooks, audit log
+│   └── fulfillment/      Consumes paid orders, calls the warehouse, reports the result
+├── widget/               Embeddable React chat widget (organised by feature)
+├── docker/               Shared multi-stage Dockerfile for the Python services
+├── infra/                Postgres init scripts, observability config
+├── scripts/init_env.py   Generates a ready-to-use .env
+└── docs/SYSTEM_DESIGN.md Architecture and design decisions
+```
+
+All configuration lives in one file, `.env`. [`.env.example`](.env.example) documents every variable.
+
+## Roadmap
+
+- [x] Catalog, carts, server-side pricing, promotions and tax
+- [x] LangGraph agent on Groq with guardrails
+- [x] Explicit confirmation, Stripe Checkout, webhook-driven order state, audit log
+- [x] Fulfilment over RabbitMQ (transactional outbox / inbox)
+- [ ] Automatic Stripe refund when fulfilment fails, with the refund recorded in the audit log
+- [ ] Reconciliation against Stripe and alerts on dead-lettered messages
+- [ ] Telegram channel (built, currently disabled)
+
+## License
+
+Released under the [MIT License](LICENSE).

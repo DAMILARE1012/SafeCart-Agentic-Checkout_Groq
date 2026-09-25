@@ -1,0 +1,62 @@
+/*
+ * Compiled once and injected into the widget's Shadow DOM (see embed.tsx), so
+ * nothing leaks into, or in from, the host storefront.
+ */
+@import 'tailwindcss';
+
+/* Dark mode follows the widget's own theme setting, not the host page. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Merchant branding arrives as CSS variables set at runtime on the widget root. */
+@theme inline {
+  --color-brand: var(--cc-brand);
+  --color-brand-fg: var(--cc-brand-fg);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+@theme {
+  --animate-typing: typing 1.2s ease-in-out infinite;
+  --animate-panel-in: panel-in 180ms ease-out;
+
+  @keyframes typing {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-3px); opacity: 1; }
+  }
+  @keyframes panel-in {
+    from { opacity: 0; transform: translateY(12px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+}
+
+:host {
+  /* Reset everything inherited from the host page. */
+  all: initial;
+  --cc-brand: #4f46e5;
+  --cc-brand-fg: #ffffff;
+}
+
+.cc-root {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: light;
+}
+
+.cc-root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* Thin, unobtrusive scrollbars inside the panel. */
+.cc-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, currentColor 20%, transparent) transparent;
+}
+
+/* Horizontal product carousel without a visible scrollbar. */
+.cc-carousel {
+  scrollbar-width: none;
+}
+.cc-carousel::-webkit-scrollbar {
+  display: none;
+}
