@@ -67,7 +67,8 @@ class Order(Base):
     total_minor: Mapped[int] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(20), default="CREATED")
     version: Mapped[int] = mapped_column(Integer, default=1)
-    # commerce-svc settlement owed for this order: 'commit' (paid) or 'release' (not paid); NULL when settled.
+    # commerce-svc settlement owed for this order: 'commit' (paid), 'release' (not paid) or 'void'
+    # (refunded); NULL when settled.
     settlement: Mapped[str | None] = mapped_column(String(10))
     stripe_checkout_session_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(255))
@@ -76,12 +77,18 @@ class Order(Base):
     # Fulfilment handoff: set when order.paid.v1 is staged; reference from fulfillment-svc.
     fulfillment_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fulfillment_reference: Mapped[str | None] = mapped_column(String(120))
+    # Compensation: the Stripe refund issued when a paid order can't be fulfilled.
+    stripe_refund_id: Mapped[str | None] = mapped_column(String(255), unique=True)
+    refund_status: Mapped[str | None] = mapped_column(String(20))  # Stripe's refund status, as last seen
+    # Operations: when a human was alerted about this order, and when Stripe's records were cross-checked.
+    attention_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint(f"status IN {ORDER_STATUSES}", name="status_valid"),
-        CheckConstraint("settlement IN ('commit', 'release')", name="settlement_valid"),
+        CheckConstraint("settlement IN ('commit', 'release', 'void')", name="settlement_valid"),
         CheckConstraint("total_minor >= 0", name="total_non_negative"),
         Index("ix_orders_settlement_pending", "settlement", postgresql_where="settlement IS NOT NULL"),
         Index("ix_orders_status_created", "status", "created_at"),

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import aio_pika
 import structlog
 from faststream.rabbit import ExchangeType, QueueType, RabbitBroker, RabbitExchange, RabbitQueue
 from faststream.rabbit.schemas.queue import QuorumQueueArgs
@@ -162,3 +163,13 @@ async def declare_dead_letter_queue(broker: RabbitBroker, dead_letter_exchange: 
         RabbitQueue(f"{dead_letter_exchange}.q", queue_type=QueueType.QUORUM, durable=True)
     )
     await queue.bind(exchange)
+
+
+async def queue_depth(url: str, name: str) -> int:
+    """Messages waiting in ``name`` (used to alert on a growing dead-letter queue). Declared passively on a
+    short-lived connection, so the count is live and nothing is created if the queue doesn't exist."""
+    connection = await aio_pika.connect(url)
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(name, passive=True)
+        return int(queue.declaration_result.message_count or 0)

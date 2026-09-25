@@ -20,9 +20,9 @@ running an LLM safely next to real money.
 
 ## Screenshots
 
-| Browse by chatting | Confirm an exact, server-priced quote | Track the order to completion |
-|:---:|:---:|:---:|
-| <img src="docs/images/widget-browse.png" width="260" alt="The assistant showing running shoes as product cards"> | <img src="docs/images/widget-confirm.png" width="260" alt="An order summary with a promo discount, tax and a Confirm and pay button"> | <img src="docs/images/widget-order.png" width="260" alt="An order tracker showing Confirmed, Payment, Preparing and Complete"> |
+| Browse by chatting | Confirm an exact, server-priced quote | Track the order to completion | Automatic refund if it can't ship |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/images/widget-browse.png" width="260" alt="The assistant showing running shoes as product cards"> | <img src="docs/images/widget-confirm.png" width="260" alt="An order summary with a promo discount, tax and a Confirm and pay button"> | <img src="docs/images/widget-order.png" width="260" alt="An order tracker showing Confirmed, Payment, Preparing and Complete"> | <img src="docs/images/widget-refund.png" width="260" alt="An order marked Refunded with the refund amount shown"> |
 
 ## How it works
 
@@ -51,6 +51,9 @@ stateDiagram-v2
     AWAITING_PAYMENT --> EXPIRED: webhook (stock released)
     PAID --> FULFILLED: fulfillment.succeeded
     PAID --> FULFILLMENT_FAILED: fulfillment.failed
+    FULFILLMENT_FAILED --> REFUND_PENDING: Stripe refund (idempotent)
+    REFUND_PENDING --> REFUNDED: refund webhook
+    REFUND_PENDING --> MANUAL_REVIEW: refund failed
 ```
 
 **What the design guarantees:**
@@ -63,8 +66,12 @@ stateDiagram-v2
   (`pay:{order_id}:v1`), webhooks are de-duplicated by event id, and each event is processed once.
 - **No lost events.** Events are written in the same database transaction as the state change, then
   published. Messages that keep failing go to a dead-letter queue instead of being dropped.
+- **Failures are compensated.** If a paid order can't be fulfilled, it is refunded in full
+  automatically, and the refund is recorded in the audit log.
+- **Nothing drifts silently.** A reconciliation job compares orders with Stripe, replays missed
+  webhooks and flags mismatches. Orders that need a person trigger an alert (Slack-compatible webhook).
 - **Tamper-evident history.** The audit log is hash-chained, and a database trigger blocks updates and
-  deletes.
+  deletes. Reconciliation re-verifies the chain.
 - **Guarded input and output.** Llama Prompt Guard screens messages for prompt injection. Replies are
   checked for prices and addresses that don't come from the backend or the shopper.
 
@@ -158,6 +165,10 @@ Press **Confirm & pay** and pay on Stripe's test page with card **4242 4242 4242
 expiry date and any CVC. The order tracker moves through *Payment received → Preparing → Complete*
 within a few seconds.
 
+**See the automatic refund:** buy **Summit Pro Limited**. The demo warehouse is set to refuse it
+(`FULFILLMENT_MOCK_FAIL_SKUS` in `.env`), so a few seconds after you pay, the order shows **Refunded**.
+The refund is visible in your Stripe test dashboard.
+
 ### Embed it in your store
 
 Serve the built bundle and add one tag to any page whose origin is listed in `WIDGET_ALLOWED_ORIGINS`:
@@ -211,8 +222,9 @@ All configuration lives in one file, `.env`. [`.env.example`](.env.example) docu
 - [x] LangGraph agent on Groq with guardrails
 - [x] Explicit confirmation, Stripe Checkout, webhook-driven order state, audit log
 - [x] Fulfilment over RabbitMQ (transactional outbox / inbox)
-- [ ] Automatic Stripe refund when fulfilment fails, with the refund recorded in the audit log
-- [ ] Reconciliation against Stripe and alerts on dead-lettered messages
+- [x] Automatic Stripe refund when fulfilment fails, with the refund recorded in the audit log
+- [x] Reconciliation against Stripe and alerts (manual review, stuck orders, dead letters, audit tampering)
+- [ ] Live order updates pushed to the widget (it polls today)
 - [ ] Telegram channel (built, currently disabled)
 
 ## License

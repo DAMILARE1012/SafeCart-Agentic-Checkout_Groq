@@ -16,9 +16,12 @@ from commerce_common.errors import Conflict, NotFound
 TRANSITIONS: dict[str, frozenset[str]] = {
     "CREATED": frozenset({"AWAITING_PAYMENT", "CANCELED"}),
     "AWAITING_PAYMENT": frozenset({"PAID", "PAYMENT_FAILED", "EXPIRED", "MANUAL_REVIEW"}),
-    "PAID": frozenset({"FULFILLED", "FULFILLMENT_FAILED", "MANUAL_REVIEW"}),  # fulfilment arrives in M4
-    "FULFILLMENT_FAILED": frozenset({"REFUND_PENDING"}),
+    "PAID": frozenset({"FULFILLED", "FULFILLMENT_FAILED", "MANUAL_REVIEW"}),
+    # Compensation saga: refund issued (idempotent) → Stripe confirms it by webhook.
+    "FULFILLMENT_FAILED": frozenset({"REFUND_PENDING", "MANUAL_REVIEW"}),
     "REFUND_PENDING": frozenset({"REFUNDED", "MANUAL_REVIEW"}),
+    # A human resolved it by refunding in the Stripe Dashboard: the refund webhook closes the order.
+    "MANUAL_REVIEW": frozenset({"REFUNDED"}),
     # Money arriving for an order we consider dead must never be ignored: a human (or M5 auto-refund) acts.
     "CANCELED": frozenset({"MANUAL_REVIEW"}),
     "EXPIRED": frozenset({"MANUAL_REVIEW"}),
@@ -26,7 +29,12 @@ TRANSITIONS: dict[str, frozenset[str]] = {
 }
 TERMINAL = frozenset({"FULFILLED", "PAYMENT_FAILED", "EXPIRED", "CANCELED", "REFUNDED", "MANUAL_REVIEW"})
 # What commerce-svc must be told after entering a state (settled asynchronously by the worker).
-SETTLEMENT_ON: dict[str, str] = {"PAID": "commit", "PAYMENT_FAILED": "release", "EXPIRED": "release"}
+SETTLEMENT_ON: dict[str, str] = {
+    "PAID": "commit",
+    "PAYMENT_FAILED": "release",
+    "EXPIRED": "release",
+    "REFUNDED": "void",  # give the promotion use back
+}
 
 
 class InvalidTransition(Conflict):

@@ -1,9 +1,10 @@
 """checkout-svc worker (compose: checkout-worker).
 
-Loops: apply Stripe webhook events (inbox) → settle orders with commerce-svc → request fulfilment
-(order.paid.v1 via the outbox) → publish the outbox → cancel orders abandoned mid-confirmation.
-Consumes fulfillment.*.v1 to move PAID orders to FULFILLED / FULFILLMENT_FAILED. All steps are
-idempotent and safe on several replicas (row locks + SKIP LOCKED + inbox).
+Loops: apply Stripe webhook events (inbox) → settle orders with commerce-svc → refund orders that
+couldn't be fulfilled (compensation) → request fulfilment (order.paid.v1 via the outbox) → publish the
+outbox → alert on orders needing review → cancel orders abandoned mid-confirmation; periodically
+reconcile with Stripe. Consumes fulfillment.*.v1 to move PAID orders to FULFILLED / FULFILLMENT_FAILED.
+All steps are idempotent and safe on several replicas (row locks + SKIP LOCKED + inbox + advisory lock).
 Run: ``python -m checkout_svc.worker``.
 """
 
@@ -22,14 +23,23 @@ from faststream import AckPolicy
 from faststream.rabbit import RabbitBroker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from checkout_svc import settlement, webhooks
+from checkout_svc import compensation, settlement, webhooks
 from checkout_svc.commerce_client import CommerceClient
 from checkout_svc.fulfillment_results import handle_fulfillment_result
 from checkout_svc.models import OUTBOX
+from checkout_svc.payments import StripePayments
+from checkout_svc.reconciliation import Reconciler, alert_orders_needing_review
 from checkout_svc.settings import CheckoutSettings
 from commerce_common import events
+from commerce_common.alerts import Alerter
 from commerce_common.db import create_engine, create_session_factory
-from commerce_common.messaging import consumer_queue, declare_dead_letter_queue, events_exchange, relay
+from commerce_common.messaging import (
+    consumer_queue,
+    declare_dead_letter_queue,
+    events_exchange,
+    queue_depth,
+    relay,
+)
 from commerce_common.observability import configure_logging
 
 log = structlog.get_logger("checkout.worker")
@@ -60,7 +70,7 @@ def build_broker(settings: CheckoutSettings, sessions: async_sessionmaker[AsyncS
 
 
 async def run(settings: CheckoutSettings) -> None:
-    engine = create_engine(settings.database_url, pool_size=3, max_overflow=0)
+    engine = create_engine(settings.database_url, pool_size=5, max_overflow=0)
     sessions = create_session_factory(engine)
     commerce = CommerceClient.create(
         settings.commerce_service_url,
@@ -76,6 +86,18 @@ async def run(settings: CheckoutSettings) -> None:
 
     broker = build_broker(settings, sessions)
     exchange = events_exchange(settings.events_exchange)
+    payments = StripePayments(settings)
+    alert_url = settings.alert_webhook_url.get_secret_value() if settings.alert_webhook_url else None
+    alerter = Alerter(alert_url, source="checkout-svc")
+    rabbitmq_url = settings.rabbitmq_url or ""
+    reconciler = Reconciler(
+        sessions,
+        payments,
+        alerter,
+        settings,
+        dead_letter_depth=lambda: queue_depth(rabbitmq_url, f"{settings.events_dlx}.q"),
+    )
+    last_reconciliation = float("-inf")  # first run right after start: catches up anything missed while down
 
     last_success = time.monotonic()
     last_stale_sweep = 0.0
@@ -102,19 +124,31 @@ async def run(settings: CheckoutSettings) -> None:
         try:
             applied = await webhooks.process_pending(sessions)
             settled = await settlement.settle_pending(sessions, commerce)
+            refunded = await compensation.refund_failed_orders(
+                sessions, payments, auto_refund=settings.compensation_auto_refund_enabled
+            )
             requested = await settlement.request_fulfillment(sessions, commerce)
             published = await relay(sessions, OUTBOX, broker, exchange)
+            alerted = await alert_orders_needing_review(sessions, alerter)
+            if (
+                settings.reconciliation_enabled
+                and time.monotonic() - last_reconciliation > settings.reconciliation_interval_seconds
+            ):
+                await reconciler.run()
+                last_reconciliation = time.monotonic()
             cancelled = 0
             if time.monotonic() - last_stale_sweep > STALE_SWEEP_EVERY_S:
                 cancelled = await settlement.cancel_stale_created(
                     sessions, settings.order_created_stale_seconds
                 )
                 last_stale_sweep = time.monotonic()
-            if applied or settled or cancelled or requested or published:
+            if applied or settled or cancelled or requested or published or refunded or alerted:
                 log.info(
                     "tick",
                     webhooks_applied=applied,
                     orders_settled=settled,
+                    refunds_issued=refunded,
+                    review_alerts=alerted,
                     fulfillments_requested=requested,
                     events_published=published,
                     stale_cancelled=cancelled,
@@ -129,6 +163,7 @@ async def run(settings: CheckoutSettings) -> None:
     server.should_exit = True
     await server_task
     await commerce.aclose()
+    await alerter.aclose()
     await engine.dispose()
     log.info("worker_stopped")
 

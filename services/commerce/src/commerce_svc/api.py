@@ -294,6 +294,12 @@ async def release_order(order_id: str, session: Session, settings: Settings) -> 
     return await ReservationService(session, settings).release(order_id)
 
 
+@settlement.post("/orders/{order_id}/void", dependencies=[Depends(require_scope("commerce:orders:settle"))])
+async def void_order(order_id: str, session: Session, settings: Settings) -> dict[str, Any]:
+    """Paid order refunded (compensation): give promotion uses back; stock is not restocked (idempotent)."""
+    return await ReservationService(session, settings).void(order_id)
+
+
 # ---------------------------------------------------------------------------
 # Quotes (read by checkout-svc to verify amount/hash/expiry before charging)
 # ---------------------------------------------------------------------------

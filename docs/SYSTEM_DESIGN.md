@@ -1,6 +1,6 @@
 # Conversational Commerce & Checkout Agent: System Design (High Level)
 
-> Status: v0.8 · 2026-09-25 · Architecture: microservices · **M1–M3 implemented, M4 core implemented** (§18–§21)
+> Status: v0.9 · 2026-09-25 · Architecture: microservices · **M1–M5 implemented** (§18–§22)
 > Scope: Architecture, the rules that must always hold, service boundaries, data flows, and the reliability model. How each part is built comes later.
 
 ---
@@ -456,7 +456,7 @@ sequenceDiagram
 
 ### 7.5 Reconciliation
 
-A scheduled job in the checkout-svc worker (`RECONCILIATION_CRON`) compares orders with Stripe, finds missed webhooks, stuck orders, and amount mismatches, and fixes them through the state machine or raises an alert. A similar sweeper in commerce-svc expires reservations whose TTL has passed.
+A scheduled job in the checkout-svc worker (every `RECONCILIATION_INTERVAL_SECONDS`) compares orders with Stripe, finds missed webhooks, stuck orders, and amount mismatches, and fixes them through the state machine or raises an alert. A similar sweeper in commerce-svc expires reservations whose TTL has passed.
 
 ---
 
@@ -980,8 +980,55 @@ After the fixes, typical turns take **0.7–3s** (about 700–2,900 input tokens
 - 95 Python tests pass. The new ones cover: fulfilled exactly once; the same order in a different message; provider refusal; transient retry reusing the same key; wiring from exchange to queue; PAID → `order.paid.v1` carrying the quote's lines and total; a duplicate outcome applied once; FULFILLMENT_FAILED; a late success being ignored.
 - **Live:** four paid orders already waiting (including `ord_57e45ed23e07ca154ba28f70`) were picked up when the worker started, and each reached **FULFILLED** in about 2.1 s. Audit trail: `created → awaiting_payment → paid → fulfillment.requested → fulfilled`. The hash chain is intact, and all queues and the dead-letter queue are empty.
 
-### 21.4 Next (M5)
+### 21.4 Next (M5, done: see §22)
 
 - Compensation on `fulfillment.failed.v1`: FULFILLMENT_FAILED → REFUND_PENDING → a Stripe refund (idempotency key `refund:{order_id}:v1`) → REFUNDED, recorded in the audit log. Oversold commits feed the same path.
 - Reconciliation against Stripe, and alerts on dead-lettered messages.
 - Pushing order events live to the widget instead of polling.
+
+## 22. Implementation Status: M5 (Compensation, reconciliation, alerts)
+
+### 22.1 What was built
+
+- **Refund saga (checkout-svc `compensation.py`).**
+  - A paid order that can't be fulfilled goes to FULFILLMENT_FAILED. There are two causes: `fulfillment.failed.v1` from the warehouse, or a stock commit that reports the SKU oversold (a very late payment after the reservation lapsed).
+  - The worker then refunds the full amount through Stripe with the idempotency key `refund:{order_id}:full`, writes a `refund.created` audit row (refund id, amount, key, cause) and moves the order to REFUND_PENDING.
+  - A Stripe refund webhook moves it to REFUNDED. `refund.failed`, a canceled refund, or a refund Stripe rejects moves it to MANUAL_REVIEW.
+  - If the refund webhook arrives before our own transaction commits, the order catches up (FULFILLMENT_FAILED → REFUND_PENDING → REFUNDED).
+  - A human who resolves a MANUAL_REVIEW order by refunding it in the Stripe Dashboard closes it the same way. The refund is matched to the order by its payment intent.
+- **Commerce compensation.** REFUNDED owes a `void` settlement. commerce-svc marks the order's promotion uses `voided` and gives them back, so a single-use code works again and the cap recovers. Stock is deliberately **not** restocked: the warehouse said it couldn't ship, so putting the item back on sale could oversell. Inventory is corrected by a person.
+- **Reconciliation (`reconciliation.py`).** It runs every `RECONCILIATION_INTERVAL_SECONDS`, plus once when the worker starts. Only one replica runs it at a time (Postgres advisory lock). It:
+  - replays payments and refunds that Stripe has but whose webhooks we missed, through `webhooks.apply_event`, the same code a real webhook uses, attributed to `system/reconciler`;
+  - checks every paid order once against its PaymentIntent. A mismatch is audited, a PAID order is stopped in MANUAL_REVIEW, and an alert is sent;
+  - alerts on stuck orders (a refund not started, a paid order not fulfilled after `FULFILLMENT_STUCK_AFTER_MINUTES`), webhook events that used up their retries, messages in the dead-letter queue, and a broken audit hash chain.
+- **Alerts (`commerce_common.alerts`).** Every alert is logged. When `ALERT_WEBHOOK_URL` is set, it is also posted as a Slack-compatible `{"text": …}` message. Each order that enters MANUAL_REVIEW is alerted **once**: `attention_alerted_at` is set only after the alert is delivered, and a failed delivery is retried on the next tick.
+- **Widget.** The order tracker already showed refund states. After payment, the cart badge now clears, because the backend empties that cart.
+
+### 22.2 Guarantees
+
+| Property | Mechanism |
+|---|---|
+| Never refunded twice | Deterministic Stripe idempotency key per order, and only FULFILLMENT_FAILED orders are picked up |
+| Refund is auditable | `refund.created` row (id, amount, key, cause), then transitions, all in the hash chain |
+| REFUNDED means Stripe says so | Only a refund webhook, or a reconciliation read of the refund, moves the order |
+| No lost webhook goes unnoticed | Reconciliation replays it through the same rules, and alerts that webhooks were missed |
+| Humans hear about every exception | MANUAL_REVIEW alerts are durable and exactly-once; stuck, dead-letter and tampering checks run periodically |
+
+### 22.3 Verified
+
+- 110 Python tests pass (15 new) and 13 widget tests pass (2 new). The new tests cover:
+  - a refund issued once across retries, with the correct key, amount and audit sequence, and the promo code given back;
+  - a refund webhook arriving first; a refund rejected by Stripe, and a refund that fails; auto-refund switched off; payment for stock that is already gone;
+  - reconciliation recovering a missed payment and a missed refund; an amount mismatch; orders verified only once; stuck-order and dead-letter alerts; a tampered audit log detected; only one replica reconciling at a time; an alert marked sent only after delivery.
+- **Live, real Groq and Stripe test mode:**
+  - Summit Pro Limited was bought through the real widget and paid on Stripe's hosted page with 4242…. The mock warehouse refused it.
+  - Stripe refund `re_…` **succeeded for 20459 USD**, equal to what the PaymentIntent received, with `metadata.order_id` set.
+  - The order went PAID → FULFILLMENT_FAILED → REFUND_PENDING → REFUNDED about 5 s after payment. Audit trail: `order.created → awaiting_payment → paid → fulfillment.requested → fulfillment_failed → refund.created → refund_pending → refunded`. The hash chain is intact.
+  - The first reconciliation after deploying verified the 5 existing paid orders against Stripe with 0 mismatches, 0 dead letters and an intact chain.
+
+### 22.4 Not built yet
+
+- `order.refunded.v1` / `order.manual_review.v1` events and live push to the gateway (the widget polls instead).
+- Partial refunds and returns for orders that were already fulfilled.
+- Incremental audit-chain verification (it currently re-hashes the full log on each run, which is fine at this scale).
+

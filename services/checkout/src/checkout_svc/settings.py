@@ -45,6 +45,15 @@ class CheckoutSettings(ServiceSettings):
     events_dlx: str = "commerce.events.dlx"
     event_max_delivery_attempts: int = 8
 
+    # Compensation, reconciliation and alerting (M5)
+    compensation_auto_refund_enabled: bool = True  # False: failed orders go to MANUAL_REVIEW instead
+    reconciliation_enabled: bool = True
+    reconciliation_interval_seconds: int = 900
+    reconciliation_lookback_hours: int = 48
+    reconciliation_grace_minutes: int = 5  # younger orders are left to the webhooks
+    fulfillment_stuck_after_minutes: int = 15
+    alert_webhook_url: SecretStr | None = None  # Slack-compatible incoming webhook; empty = log only
+
     @field_validator("gateway_svc_api_key_hash", "agent_svc_api_key_hash")
     @classmethod
     def _hashes(cls, value: str, info: object) -> str:

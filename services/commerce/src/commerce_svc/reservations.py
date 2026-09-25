@@ -7,6 +7,7 @@ double-committing or double-releasing.
     lock(quote, order)  : quote active → locked; stock reserved (TTL); promo uses reserved
     commit(order)       : payment confirmed → stock leaves on_hand; promo uses final; cart emptied
     release(order)      : payment failed/expired/cancelled → stock and promo uses given back
+    void(order)         : paid order refunded (compensation) → promo uses given back; stock NOT restocked
 """
 
 from __future__ import annotations
@@ -228,6 +229,34 @@ class ReservationService:
         )
         await self._session.flush()
         return {"order_id": order_id, "released_reservations": released}
+
+    # ------------------------------------------------------------------------------ void
+    async def void(self, order_id: str) -> dict[str, Any]:
+        """A paid order was refunded because it could not be fulfilled. Idempotent.
+
+        Committed promotion uses are given back (a single-use code can be used again, and the cap
+        recovers). Stock is deliberately NOT returned: the order failed because the warehouse could
+        not ship it, so putting it back on sale could oversell. Inventory is corrected by a human.
+        """
+        redemptions = (
+            await self._session.execute(
+                select(PromotionRedemption)
+                .where(PromotionRedemption.order_id == order_id, PromotionRedemption.status == "committed")
+                .with_for_update()
+            )
+        ).scalars()
+        voided = 0
+        for redemption in redemptions:
+            await self._session.execute(
+                text(
+                    "UPDATE promotions SET redemption_count = GREATEST(redemption_count - 1, 0) WHERE id = :p"
+                ),
+                {"p": redemption.promotion_id},
+            )
+            redemption.status = "voided"
+            voided += 1
+        await self._session.flush()
+        return {"order_id": order_id, "voided_redemptions": voided, "restocked": False}
 
     async def _reservations(self, order_id: str, *, lock: bool) -> list[InventoryReservation]:
         stmt = select(InventoryReservation).where(InventoryReservation.order_id == order_id)

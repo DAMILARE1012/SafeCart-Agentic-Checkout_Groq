@@ -294,11 +294,11 @@ class PromotionRedemption(Timestamps, Base):
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     order_id: Mapped[str] = mapped_column(String(40), index=True)
     promotion_id: Mapped[str] = mapped_column(ForeignKey("promotions.id"))
-    status: Mapped[str] = mapped_column(String(10), default="reserved")  # reserved|committed|released
+    status: Mapped[str] = mapped_column(String(10), default="reserved")  # reserved|committed|released|voided
 
     __table_args__ = (
         UniqueConstraint("order_id", "promotion_id"),
-        CheckConstraint("status IN ('reserved', 'committed', 'released')", name="status_valid"),
+        CheckConstraint("status IN ('reserved', 'committed', 'released', 'voided')", name="status_valid"),
     )
 
 

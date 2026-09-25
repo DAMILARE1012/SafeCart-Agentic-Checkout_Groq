@@ -7,28 +7,16 @@ import uuid
 from typing import Any
 
 import httpx
-from checkout_testkit import GATEWAY, confirm, deliver, grant, quoted_cart, session_event
+from checkout_testkit import GATEWAY, paid_order
 from faststream.rabbit import RabbitQueue, TestRabbitBroker
 from sqlalchemy import text
 
-from checkout_svc import settlement, webhooks
+from checkout_svc import settlement
 from checkout_svc.fulfillment_results import handle_fulfillment_result
 from checkout_svc.models import OUTBOX
 from checkout_svc.worker import build_broker
 from commerce_common import events
 from commerce_common.messaging import events_exchange, relay
-
-
-async def paid_order(checkout: httpx.AsyncClient, commerce_http: httpx.AsyncClient) -> dict[str, Any]:
-    data = await quoted_cart(commerce_http, "sku_road_air_10_wht", 2)
-    g = await grant(checkout, data)
-    order_id = (await confirm(checkout, g["token"], data["conversation_id"])).json()["order_id"]
-    order = (await checkout.get(f"/v1/orders/{order_id}", headers=GATEWAY)).json()
-    await deliver(checkout, session_event("checkout.session.completed", order))
-    app = checkout.app  # type: ignore[attr-defined]
-    await webhooks.process_pending(app.state.session_factory)
-    await settlement.settle_pending(app.state.session_factory, app.state.commerce)
-    return {**order, "quote": data["quote"]}
 
 
 def outcome(event_type: str, order_id: str, **extra: Any) -> events.Envelope:
@@ -64,7 +52,7 @@ async def test_paid_order_is_handed_to_fulfilment_once_and_completes(
 ) -> None:
     app = checkout.app  # type: ignore[attr-defined]
     sessions = app.state.session_factory
-    order = await paid_order(checkout, commerce_http)
+    order = await paid_order(checkout, commerce_http, "sku_road_air_10_wht", 2)
 
     assert await settlement.request_fulfillment(sessions, app.state.commerce) >= 1
     assert await settlement.request_fulfillment(sessions, app.state.commerce) == 0  # staged once, ever

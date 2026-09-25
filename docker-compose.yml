@@ -149,8 +149,10 @@ x-checkout-env: &checkout-env
   MAX_ORDER_TOTAL_MINOR: ${MAX_ORDER_TOTAL_MINOR}
   COMPENSATION_AUTO_REFUND_ENABLED: ${COMPENSATION_AUTO_REFUND_ENABLED}
   RECONCILIATION_ENABLED: ${RECONCILIATION_ENABLED}
-  RECONCILIATION_CRON: ${RECONCILIATION_CRON}
+  RECONCILIATION_INTERVAL_SECONDS: ${RECONCILIATION_INTERVAL_SECONDS}
   RECONCILIATION_LOOKBACK_HOURS: ${RECONCILIATION_LOOKBACK_HOURS}
+  RECONCILIATION_GRACE_MINUTES: ${RECONCILIATION_GRACE_MINUTES}
+  FULFILLMENT_STUCK_AFTER_MINUTES: ${FULFILLMENT_STUCK_AFTER_MINUTES}
   ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
 
 x-fulfillment-env: &fulfillment-env
@@ -545,7 +547,7 @@ services:
       - --forward-to
       - http://checkout-api:8000/webhooks/stripe
       - --events
-      - checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed
+      - checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,refund.created,refund.updated,refund.failed
     networks: [backend]
 
 networks:

@@ -14,12 +14,12 @@ from checkout_testkit import (
     deliver,
     grant,
     quoted_cart,
+    run_worker,
     session_event,
     sign,
 )
 from sqlalchemy import text
 
-from checkout_svc import settlement, webhooks
 from checkout_svc.audit import verify_chain
 from checkout_svc.payments import PaymentRejected, PaymentTemporarilyUnavailable
 from checkout_svc.settings import CheckoutSettings
@@ -27,12 +27,6 @@ from checkout_svc.settings import CheckoutSettings
 
 async def order_of(checkout: httpx.AsyncClient, order_id: str) -> dict[str, Any]:
     return (await checkout.get(f"/v1/orders/{order_id}", headers=GATEWAY)).json()
-
-
-async def run_worker(checkout: httpx.AsyncClient) -> None:
-    app = checkout.app  # type: ignore[attr-defined]
-    await webhooks.process_pending(app.state.session_factory)
-    await settlement.settle_pending(app.state.session_factory, app.state.commerce)
 
 
 async def test_happy_path_confirm_pay_settle(

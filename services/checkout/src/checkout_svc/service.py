@@ -45,6 +45,10 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# Stripe refund statuses → the three the widget shows (contracts.ts: OrderSummary.refund.status).
+_REFUND_VIEW = {"succeeded": "succeeded", "failed": "failed", "canceled": "failed"}
+
+
 def order_summary(order: Order) -> dict[str, Any]:
     """Wire shape the widget renders (widget/src/shared/api/contracts.ts: OrderSummary)."""
     return {
@@ -52,7 +56,14 @@ def order_summary(order: Order) -> dict[str, Any]:
         "status": order.status,
         "total": {"amount_minor": order.total_minor, "currency": order.currency},
         "checkout_url": order.checkout_url if order.status == "AWAITING_PAYMENT" else None,
-        "refund": None,
+        "refund": (
+            {
+                "amount": {"amount_minor": order.total_minor, "currency": order.currency},
+                "status": _REFUND_VIEW.get(order.refund_status or "", "pending"),
+            }
+            if order.stripe_refund_id
+            else None
+        ),
         "updated_at": order.updated_at.isoformat(),
     }
 

@@ -1,9 +1,9 @@
-"""Tells commerce-svc the outcome of each order (commit stock on payment, release it otherwise).
+"""Tells commerce-svc the outcome of each order: commit stock on payment, release it when payment
+never happened, void the promotion use when a paid order is refunded.
 
 Order transitions record WHAT is owed in ``orders.settlement`` inside the same transaction. This
 worker job delivers it later, with retries, and clears the marker. It works like an outbox, so a
-crash between "order paid" and "stock committed" can never lose the commit. (M4 moves this onto
-RabbitMQ events; the guarantee stays the same.)
+crash between "order paid" and "stock committed" can never lose the commit.
 """
 
 from __future__ import annotations
@@ -40,21 +40,33 @@ async def settle_pending(
         )
     settled = 0
     for order_id, action in pending:
+        oversold: list[str] = []
         try:
             if action == "commit":
-                result = await commerce.commit(order_id)
-                if result.get("oversold_sku_ids"):
-                    # Paid, but stock ran out after the reservation expired: fulfilment (M4) must compensate.
-                    log.error("order_oversold", order_id=order_id, sku_ids=result["oversold_sku_ids"])
+                oversold = (await commerce.commit(order_id)).get("oversold_sku_ids") or []
+            elif action == "void":
+                await commerce.void(order_id)
             else:
                 await commerce.release(order_id)
         except (CommerceUnavailable, CommerceRejected) as exc:
             log.warning("settlement_retry_later", order_id=order_id, action=action, error=type(exc).__name__)
             continue
         async with sessions() as session, session.begin():
-            order = await session.get(Order, order_id, with_for_update=True)
-            if order is not None and order.settlement == action:
+            order = await orders.load_for_update(session, order_id)
+            if order.settlement == action:
                 order.settlement = None
+            if oversold and order.status == "PAID":
+                # Paid, but the stock was gone (the reservation expired before a very late payment):
+                # never ship nothing silently. Compensate: the refund saga takes it from here.
+                log.error("order_oversold", order_id=order_id, sku_ids=oversold)
+                await orders.transition(
+                    session,
+                    order,
+                    "FULFILLMENT_FAILED",
+                    actor_type="system",
+                    actor_id="checkout-worker",
+                    reason=f"out_of_stock_after_payment: {', '.join(oversold)}"[:120],
+                )
         settled += 1
         log.info("order_settled", order_id=order_id, action=action)
     return settled

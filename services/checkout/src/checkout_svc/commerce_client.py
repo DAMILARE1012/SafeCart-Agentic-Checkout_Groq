@@ -75,3 +75,6 @@ class CommerceClient:
 
     async def release(self, order_id: str) -> dict[str, Any]:
         return await self._call("POST", f"/internal/orders/{order_id}/release")
+
+    async def void(self, order_id: str) -> dict[str, Any]:
+        return await self._call("POST", f"/internal/orders/{order_id}/void")

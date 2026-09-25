@@ -1,8 +1,8 @@
 """Shared test kit for checkout-svc (helpers + fixtures).
 
 Real Postgres (one container, separate commerce/checkout databases, like production), the real
-commerce-svc in-process, and real Stripe webhook signature verification. Only Stripe's API call to
-create a Checkout Session is faked.
+commerce-svc in-process, and real Stripe webhook signature verification. Only Stripe's API calls
+(Checkout Sessions, refunds, lookups) are faked.
 """
 
 from __future__ import annotations
@@ -25,14 +25,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
+from checkout_svc import settlement, webhooks
 from checkout_svc.commerce_client import CommerceClient
 from checkout_svc.main import create_app as create_checkout_app
 from checkout_svc.migrate import upgrade as upgrade_checkout
 from checkout_svc.payments import (
     CheckoutSessionResult,
+    PaymentRejected,
+    RefundResult,
     verify_webhook,
 )
 from checkout_svc.settings import CheckoutSettings
+from commerce_common.alerts import Alerter
 from commerce_common.auth import hash_api_key
 from commerce_common.db import create_engine, create_session_factory
 from commerce_svc.main import create_app as create_commerce_app
@@ -47,10 +51,19 @@ ADDRESS = {"line1": "1 Main St", "city": "Austin", "region": "TX", "postal_code"
 
 @dataclass
 class FakeStripe:
-    """Stands in for Stripe's Checkout Session API; webhook verification is Stripe's real code."""
+    """Stands in for Stripe's API (sessions, refunds, lookups); webhook verification is Stripe's real code.
+
+    Refunds are idempotent per key, like Stripe: the same key returns the same refund.
+    """
 
     calls: list[dict[str, Any]] = field(default_factory=list)
     fail_with: type[Exception] | None = None
+    sessions: dict[str, dict[str, Any]] = field(default_factory=dict)  # checkout session id → object
+    refund_calls: list[dict[str, Any]] = field(default_factory=list)
+    refunds: dict[str, dict[str, Any]] = field(default_factory=dict)  # idempotency key → refund object
+    refund_status: str = "succeeded"
+    refund_fail_with: type[Exception] | None = None
+    intents: dict[str, dict[str, Any]] = field(default_factory=dict)  # payment intent overrides
 
     async def create_checkout_session(
         self, *, order_id: str, conversation_id: str, quote: dict[str, Any], idempotency_key: str
@@ -58,14 +71,108 @@ class FakeStripe:
         self.calls.append({"order_id": order_id, "quote": quote, "idempotency_key": idempotency_key})
         if self.fail_with:
             raise self.fail_with("stripe says no")
+        session_id, url = f"cs_test_{order_id}", f"https://checkout.stripe.test/c/pay/{order_id}"
+        self.sessions[session_id] = {
+            "id": session_id,
+            "object": "checkout.session",
+            "status": "open",
+            "payment_status": "unpaid",
+            "amount_total": quote["total"]["amount_minor"],
+            "currency": quote["total"]["currency"].lower(),
+            "client_reference_id": order_id,
+            "metadata": {"order_id": order_id},
+            "payment_intent": None,
+            "url": url,
+        }
         return CheckoutSessionResult(
-            session_id=f"cs_test_{order_id}",
-            url=f"https://checkout.stripe.test/c/pay/{order_id}",
-            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            session_id=session_id, url=url, expires_at=datetime.now(UTC) + timedelta(minutes=30)
         )
 
     def parse_webhook(self, payload: bytes, signature: str | None) -> dict[str, Any]:
         return verify_webhook(payload, signature, WEBHOOK_SECRET, 300)
+
+    def pay(self, order_id: str) -> dict[str, Any]:
+        """The customer paid on Stripe's page (whether or not its webhook ever reaches us)."""
+        session = self.sessions[f"cs_test_{order_id}"]
+        session.update(status="complete", payment_status="paid", payment_intent=f"pi_test_{order_id}")
+        return session
+
+    async def create_refund(
+        self, *, order_id: str, payment_intent_id: str, amount_minor: int, idempotency_key: str
+    ) -> RefundResult:
+        self.refund_calls.append(
+            {
+                "order_id": order_id,
+                "payment_intent": payment_intent_id,
+                "amount": amount_minor,
+                "key": idempotency_key,
+            }
+        )
+        if self.refund_fail_with:
+            raise self.refund_fail_with("refund refused")
+        if f"cs_test_{order_id}" not in self.sessions:  # an order another test created
+            raise PaymentRejected(f"No such payment_intent: {payment_intent_id}")
+        refund = self.refunds.setdefault(
+            idempotency_key,
+            {
+                "id": f"re_test_{order_id}",
+                "object": "refund",
+                "status": self.refund_status,
+                "amount": amount_minor,
+                "currency": self.sessions[f"cs_test_{order_id}"]["currency"],
+                "payment_intent": payment_intent_id,
+                "metadata": {"order_id": order_id},
+            },
+        )
+        return RefundResult(
+            refund_id=refund["id"],
+            status=refund["status"],
+            amount_minor=refund["amount"],
+            currency=refund["currency"].upper(),
+        )
+
+    async def retrieve_checkout_session(self, session_id: str) -> dict[str, Any]:
+        if session_id not in self.sessions:
+            raise PaymentRejected(f"No such checkout.session: {session_id}")
+        return dict(self.sessions[session_id])
+
+    async def retrieve_refund(self, refund_id: str) -> dict[str, Any]:
+        for refund in self.refunds.values():
+            if refund["id"] == refund_id:
+                return dict(refund)
+        raise PaymentRejected(f"No such refund: {refund_id}")
+
+    async def retrieve_payment_intent(self, payment_intent_id: str) -> dict[str, Any]:
+        session = self.sessions.get(f"cs_test_{payment_intent_id.removeprefix('pi_test_')}")
+        if session is None:
+            raise PaymentRejected(f"No such payment_intent: {payment_intent_id}")  # another test's order
+        intent = {
+            "id": payment_intent_id,
+            "object": "payment_intent",
+            "status": "succeeded",
+            "amount_received": session["amount_total"],
+            "currency": session["currency"],
+        }
+        return {**intent, **self.intents.get(payment_intent_id, {})}
+
+
+class RecordingAlerter(Alerter):
+    """Logs like the real one (no webhook URL) and remembers what it sent."""
+
+    def __init__(self) -> None:
+        super().__init__(None, source="checkout-svc-test")
+        self.sent: list[dict[str, Any]] = []
+
+    async def send(self, key: str, title: str, **kwargs: Any) -> bool:
+        self.sent.append({"key": key, "title": title, **kwargs})
+        return await super().send(key, title, **kwargs)
+
+    def sent_keys(self) -> list[str]:
+        return [a["key"] for a in self.sent]
+
+
+def refunds_for(stripe: FakeStripe, order_id: str) -> list[dict[str, Any]]:
+    return [c for c in stripe.refund_calls if c["order_id"] == order_id]
 
 
 def sign(payload: bytes, secret: str = WEBHOOK_SECRET, timestamp: int | None = None) -> str:
@@ -73,6 +180,11 @@ def sign(payload: bytes, secret: str = WEBHOOK_SECRET, timestamp: int | None = N
     ts = timestamp or int(time.time())
     digest = hmac.new(secret.encode(), f"{ts}.".encode() + payload, hashlib.sha256).hexdigest()
     return f"t={ts},v1={digest}"
+
+
+def refund_event(kind: str, refund: dict[str, Any], **changes: Any) -> bytes:
+    event = {"id": f"evt_{uuid.uuid4().hex[:16]}", "type": kind, "data": {"object": {**refund, **changes}}}
+    return json.dumps(event).encode()
 
 
 def session_event(kind: str, order: dict[str, Any], *, amount: int | None = None, paid: bool = True) -> bytes:
@@ -184,7 +296,7 @@ AGENT = {"Authorization": f"Bearer {AGENT_KEY}"}
 
 
 async def quoted_cart(
-    commerce_http: httpx.AsyncClient, sku: str = "sku_merino_socks_m", qty: int = 1
+    commerce_http: httpx.AsyncClient, sku: str = "sku_merino_socks_m", qty: int = 1, promo: str | None = None
 ) -> dict[str, Any]:
     """Does what agent-svc does: cart → item → address → quote. Returns conversation + quote."""
     agent = {"Authorization": f"Bearer {AGENT_KEY}"}
@@ -198,6 +310,9 @@ async def quoted_cart(
         headers={**agent, "Idempotency-Key": uuid.uuid4().hex},
     )
     assert r.status_code == 200, r.text
+    if promo:
+        r = await commerce_http.put(f"/v1/carts/{cart['id']}/promotion", json={"code": promo}, headers=agent)
+        assert r.status_code == 200, r.text
     await commerce_http.put(f"/v1/carts/{cart['id']}/shipping-address", json=ADDRESS, headers=agent)
     quote = (
         await commerce_http.post(
@@ -235,3 +350,27 @@ async def deliver(
         content=payload,
         headers={"Stripe-Signature": signature or sign(payload), "Content-Type": "application/json"},
     )
+
+
+async def run_worker(checkout: httpx.AsyncClient) -> None:
+    """One pass of the checkout worker's webhook and settlement steps."""
+    app = checkout.app  # type: ignore[attr-defined]
+    await webhooks.process_pending(app.state.session_factory)
+    await settlement.settle_pending(app.state.session_factory, app.state.commerce)
+
+
+async def paid_order(
+    checkout: httpx.AsyncClient,
+    commerce_http: httpx.AsyncClient,
+    sku: str = "sku_road_air_10_wht",
+    qty: int = 1,
+    promo: str | None = None,
+) -> dict[str, Any]:
+    """Quote → grant → confirm → signed 'completed' webhook → PAID, with stock committed."""
+    data = await quoted_cart(commerce_http, sku, qty, promo=promo)
+    g = await grant(checkout, data)
+    order_id = (await confirm(checkout, g["token"], data["conversation_id"])).json()["order_id"]
+    order = (await checkout.get(f"/v1/orders/{order_id}", headers=GATEWAY)).json()
+    await deliver(checkout, session_event("checkout.session.completed", order))
+    await run_worker(checkout)
+    return {**order, "quote": data["quote"], "cart": data["cart"]}

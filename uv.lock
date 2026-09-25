@@ -513,8 +513,10 @@ name = "commerce-common"
 version = "0.1.0"
 source = { editable = "libs/common" }
 dependencies = [
+    { name = "aio-pika" },
     { name = "fastapi" },
     { name = "faststream", extra = ["rabbit"] },
+    { name = "httpx" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "opentelemetry-instrumentation-httpx" },
@@ -528,8 +530,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aio-pika", specifier = ">=10" },
     { name = "fastapi", specifier = ">=0.116" },
     { name = "faststream", extras = ["rabbit"], specifier = ">=0.7" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.35" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.56b0" },
     { name = "opentelemetry-instrumentation-httpx", specifier = ">=0.56b0" },
