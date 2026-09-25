@@ -21,13 +21,15 @@ from fastapi.responses import JSONResponse
 
 from commerce_common.db import create_engine, create_session_factory
 from commerce_common.idempotency import purge_expired
-from commerce_common.observability import configure_logging
+from commerce_common.metrics import counter
+from commerce_common.observability import configure_logging, setup_worker_telemetry, shutdown_telemetry
 from commerce_svc.models import IDEMPOTENCY_KEYS
 from commerce_svc.quotes import expire_stale_quotes
 from commerce_svc.reservations import release_expired_reservations
 from commerce_svc.settings import CommerceSettings
 
 log = structlog.get_logger("commerce.worker")
+RESERVATIONS_EXPIRED = counter("commerce.reservations.expired", "Stock reservations released by TTL")
 
 QUOTE_SWEEP_S = 30
 PURGE_EVERY_S = 3600
@@ -36,6 +38,7 @@ STALE_AFTER_S = 5 * QUOTE_SWEEP_S  # health fails if the loop stops making progr
 
 async def run(settings: CommerceSettings) -> None:
     engine = create_engine(settings.database_url, pool_size=2, max_overflow=0)
+    setup_worker_telemetry(settings, engine)
     sessions = create_session_factory(engine)
     last_success = time.monotonic()
     last_purge = 0.0
@@ -73,6 +76,7 @@ async def run(settings: CommerceSettings) -> None:
                         session, IDEMPOTENCY_KEYS, older_than_hours=settings.idempotency_ttl_hours
                     )
                     last_purge = time.monotonic()
+            RESERVATIONS_EXPIRED.add(released)
             if expired or purged or released:
                 log.info(
                     "sweep",
@@ -89,6 +93,7 @@ async def run(settings: CommerceSettings) -> None:
     server.should_exit = True
     await server_task
     await engine.dispose()
+    shutdown_telemetry()
     log.info("worker_stopped")
 
 

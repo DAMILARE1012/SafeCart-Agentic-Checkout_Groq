@@ -20,10 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from checkout_svc import audit, orders
 from checkout_svc.models import Order
 from checkout_svc.payments import PaymentProvider, PaymentRejected, PaymentTemporarilyUnavailable
+from commerce_common.metrics import counter, prime_labels
 
 log = structlog.get_logger("checkout.compensation")
 
 ACTOR = "compensation"
+REFUNDS = prime_labels(
+    counter("checkout.refunds", "Compensation refunds by outcome"),
+    [{"outcome": o} for o in ("created", "rejected", "retry_later")],
+)
 
 
 def refund_idempotency_key(order_id: str) -> str:
@@ -67,9 +72,11 @@ async def refund_failed_orders(
             )
         except PaymentTemporarilyUnavailable as exc:
             log.warning("refund_retry_later", order_id=order_id, error=str(exc))
+            REFUNDS.add(1, {"outcome": "retry_later"})
             continue  # next tick, same key
         except PaymentRejected as exc:
             log.error("refund_rejected", order_id=order_id, error=str(exc))
+            REFUNDS.add(1, {"outcome": "rejected"})
             moved += await _to_manual_review(sessions, order_id, f"refund_rejected: {exc}"[:120])
             continue
 
@@ -103,6 +110,7 @@ async def refund_failed_orders(
                 )
         moved += 1
         log.info("refund_created", order_id=order_id, refund_id=refund.refund_id, status=refund.status)
+        REFUNDS.add(1, {"outcome": "created"})
     return moved
 
 

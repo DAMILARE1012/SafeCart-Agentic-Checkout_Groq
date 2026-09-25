@@ -1,0 +1,23 @@
+{
+  "properties": {
+    "fulfillment_id": {
+      "title": "Fulfillment Id",
+      "type": "string"
+    },
+    "order_id": {
+      "title": "Order Id",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "order_id",
+    "fulfillment_id",
+    "reason"
+  ],
+  "title": "FulfillmentFailedV1",
+  "type": "object"
+}

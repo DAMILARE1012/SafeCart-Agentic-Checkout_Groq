@@ -12,6 +12,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from commerce_common.errors import DomainError
+from commerce_common.http import ID_PATTERN
+from commerce_common.metrics import counter, prime_labels
 from commerce_common.sse import SSE_HEADERS, sse_comment, sse_event
 from gateway_svc import sessions
 from gateway_svc.agent_client import AgentClient
@@ -24,8 +26,16 @@ router = APIRouter(prefix="/v1", tags=["widget"])
 ConversationId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_\-]{1,64}$")]
 
 
+RATE_LIMITED = prime_labels(counter("gateway.rate_limited", "Requests refused by rate limits"))
+
+
 class RateLimited(DomainError):
     http_status = 429
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(code, message)
+        RATE_LIMITED.add(1)
+
     retryable = True
 
 
@@ -275,7 +285,9 @@ async def confirm_checkout(
 
 
 @router.get("/orders/{order_id}")
-async def get_order(order_id: Annotated[str, Path(max_length=40)], request: Request) -> dict[str, Any]:
+async def get_order(
+    order_id: Annotated[str, Path(max_length=64, pattern=ID_PATTERN)], request: Request
+) -> dict[str, Any]:
     session = sessions.session_from_request(request)
     checkout: CheckoutClient = request.app.state.checkout_client
     return await checkout.order(order_id, session.conversation_id)  # scoped: other customers' orders 404

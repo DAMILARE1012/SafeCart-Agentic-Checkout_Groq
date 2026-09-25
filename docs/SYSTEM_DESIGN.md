@@ -1,6 +1,6 @@
 # Conversational Commerce & Checkout Agent: System Design (High Level)
 
-> Status: v0.9 · 2026-09-25 · Architecture: microservices · **M1–M5 implemented** (§18–§22)
+> Status: v1.0 · 2026-09-25 · Architecture: microservices · **M1–M6 implemented** (§18–§23)
 > Scope: Architecture, the rules that must always hold, service boundaries, data flows, and the reliability model. How each part is built comes later.
 
 ---
@@ -1032,3 +1032,65 @@ After the fixes, typical turns take **0.7–3s** (about 700–2,900 input tokens
 - Partial refunds and returns for orders that were already fulfilled.
 - Incremental audit-chain verification (it currently re-hashes the full log on each run, which is fine at this scale).
 
+## 23. Implementation Status: M6 (Hardening)
+
+### 23.1 What was built
+
+- **Guardrails (agent-svc `guardrails.py`, `graph.py`).**
+  - **Input, layer 1:** deterministic rules catch unambiguous prompt-injection phrasing: instruction overrides, prompt extraction, role overrides, fake system markup, and price manipulation. Text is NFKC-normalised and invisible characters are stripped first, so full-width and zero-width tricks don't work. A match is refused without calling the classifier or the LLM, and this layer keeps working when Prompt Guard (layer 2) is unavailable.
+  - **Output:** a draft reply is checked against what actually happened in the turn:
+    - amounts (existing);
+    - **claims** (cart changes, discounts, payments, refunds, and "I found N products") must be backed by a tool that succeeded in this turn;
+    - **promo codes** must come from tool results or from the customer;
+    - **credentials and system-prompt fragments** are replaced outright.
+  - Fixable problems get one regeneration with precise feedback. Whatever remains is removed sentence by sentence.
+  - A test fails if any tool skips the per-phase allowlist check.
+- **Evals (`evals/`).**
+  - **Offline (every CI run):** a labelled injection set of 35 attacks and 35 benign messages, and a labelled output-guard set of 33 draft replies. Gates: 100% on rule-gated attacks, 0 false positives, and exact agreement on the output labels. Reports are written as JSON and Markdown and also appear in the CI job summary.
+  - **Live (nightly or on demand, `.github/workflows/evals-live.yml`):** the real graph on real Groq with the real commerce-svc. 9 quality cases (threshold 80%) and 8 safety cases (threshold 100%), including indirect injection through a poisoned product description. Every turn is also checked for leaks, payment or refund claims, and unverified prices. The Prompt Guard classifier is measured on the injection set.
+  - **Property tests:** a model-based Hypothesis suite generates webhook histories (duplicates, reorderings, wrong amounts) and refund outcomes, and compares the real system with a reference state machine. It also asserts that no payment exists without a redeemed confirmation.
+- **Contracts (`contracts/`).**
+  - Committed OpenAPI snapshots for all 4 HTTP services, with drift detection.
+  - Additive-only compatibility checks for versioned events.
+  - **Consumer-driven:** the widget publishes its expectations as JSON Schema (`npm run contracts`, generated from `contracts.ts`). Agent, gateway and checkout tests validate their real outputs against it.
+  - **Schemathesis fuzzing** of the commerce, checkout and gateway APIs: no 5xx, and responses match their schemas.
+- **Chaos.**
+  - **In-process (CI):** Stripe outage during a refund, a crash between Stripe's refund and our commit, a commerce outage during settlement, a broker refusing publishes, and a poisoned webhook among healthy ones.
+  - **Live (`scripts/chaos.py`, against the running stack):** RabbitMQ paused, checkout-worker SIGKILLed, commerce-api stopped, fulfillment-worker stopped, a webhook storm, and a real refund. Payments are real Stripe test-mode PaymentIntents. Invariants are checked afterwards.
+- **Metrics and dashboards.**
+  - Workers now export telemetry.
+  - Business, reliability and LLM metrics, with low-cardinality labels. Counters are primed at 0 so Prometheus sees the first event after a deploy.
+  - Prometheus scrapes RabbitMQ per queue and has 11 alert rules (`infra/prometheus/alerts.yml`).
+  - Two provisioned Grafana dashboards: *Business & money* and *Reliability & agent*. They are generated from `scripts/build_dashboards.py`.
+- **Ops:** `python -m checkout_svc.ops retry-dead-webhooks` replays parked Stripe events after a fix and records each replay in the audit log.
+
+### 23.2 Defects M6 found (and fixed)
+
+| Found by | Defect | Fix |
+|---|---|---|
+| Live evals | The model replied "I found 10 trail shoes" **without calling any tool** | New `catalog_results` claim guard |
+| Offline evals | Injection rules missed "pretend to be the *store* admin" and "set the price *of the Trail Runner* to 0" | Rules widened; benign set still 0 false positives |
+| API fuzzing | Gateway `GET /v1/orders/{id}` returned **500** on control characters | IDs validated at the edge |
+| API fuzzing | checkout put request ids straight into service-to-service URLs: 500s and **path traversal** (`../carts/x`) | `segment()` on all 22 client call sites, plus edge patterns |
+| API fuzzing | A NUL byte in a cart id or search query reached PostgreSQL: **500** | Edge patterns, plus a `DBAPIError` handler that returns `400 invalid_characters` |
+| Dashboards | A late webhook for an order that had moved on **crashed its handler** (logger `event=` keyword clash), retried 8×, then parked as "dead". Since M3 | Fixed. The property test now also asserts every event is processed (Hypothesis shrank it to `['paid', 'expired']`) |
+| Dashboards | The first counter increment after each deploy was invisible to `increase()`: **refunded volume showed $0** | Counters primed at 0 at startup |
+| Dashboards | Reconciliation gauges went stale between 15-minute runs, so the audit chain showed "No data" | Observable gauges report the last result on every export |
+
+### 23.3 Verified
+
+- **208 Python tests** (up from 110) and 13 widget tests pass. Ruff and strict mypy are clean.
+- **Offline evals:** gated attack recall 100%, benign pass rate 100%, output guards 100%.
+- **Live evals on Groq:** safety **100%**, quality **100%**, median turn 2.3 s.
+  - The Prompt Guard classifier alone catches **60%** of attacks. Combined with the rules, **88.6%**.
+  - One classifier false positive ("Ignore my last message", scored 0.9995) is a known limitation: it only asks the customer to rephrase.
+  - The attacks it misses are social engineering ("the manager says 90% off"). Those still fail, because no tool can grant a discount or mark an order paid.
+- **Deep fuzzing:** 300 examples per operation on commerce, checkout and the gateway, with no 5xx.
+- **Live chaos:** all 6 scenarios pass. Every order ends FULFILLED, or REFUNDED through a real Stripe refund, exactly once. The audit chain is intact, the outbox is drained, and the dead-letter queue is empty.
+- **Dashboards against the database:** refunds and fulfilments match exactly. The only loss is up to 15 s of unexported metrics when a process is SIGKILLed, which is why money truth comes from the database and audit log, not from metrics.
+
+### 23.4 Not built yet
+
+- Alertmanager routing for the Prometheus rules. Order-level alerts already go to `ALERT_WEBHOOK_URL`.
+- Traces across RabbitMQ: the trace context isn't carried in message headers yet.
+- Live order events pushed to the widget (it polls).

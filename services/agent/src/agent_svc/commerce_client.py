@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
-from commerce_common.http import service_client
+from commerce_common.http import segment, service_client
 
 
 class CommerceError(Exception):
@@ -103,7 +103,9 @@ class CommerceClient:
         return await self._request("GET", "/v1/products/search", params=params)
 
     async def get_product(self, product_id: str, *, currency: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/products/{product_id}", params={"currency": currency})
+        return await self._request(
+            "GET", f"/v1/products/{segment(product_id)}", params={"currency": currency}
+        )
 
     async def promotions(self) -> dict[str, Any]:
         return await self._request("GET", "/v1/promotions")
@@ -115,38 +117,40 @@ class CommerceClient:
         )
 
     async def get_cart(self, cart_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/carts/{cart_id}")
+        return await self._request("GET", f"/v1/carts/{segment(cart_id)}")
 
     async def add_item(
         self, cart_id: str, sku_id: str, quantity: int, *, idempotency_key: str
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
-            f"/v1/carts/{cart_id}/items",
+            f"/v1/carts/{segment(cart_id)}/items",
             json={"sku_id": sku_id, "quantity": quantity},
             idempotency_key=idempotency_key,
         )
 
     async def set_quantity(self, cart_id: str, item_id: str, quantity: int) -> dict[str, Any]:
         return await self._request(
-            "PATCH", f"/v1/carts/{cart_id}/items/{item_id}", json={"quantity": quantity}
+            "PATCH", f"/v1/carts/{segment(cart_id)}/items/{segment(item_id)}", json={"quantity": quantity}
         )
 
     async def remove_item(self, cart_id: str, item_id: str) -> dict[str, Any]:
-        return await self._request("DELETE", f"/v1/carts/{cart_id}/items/{item_id}")
+        return await self._request("DELETE", f"/v1/carts/{segment(cart_id)}/items/{segment(item_id)}")
 
     async def apply_promo(self, cart_id: str, code: str) -> dict[str, Any]:
-        return await self._request("PUT", f"/v1/carts/{cart_id}/promotion", json={"code": code})
+        return await self._request("PUT", f"/v1/carts/{segment(cart_id)}/promotion", json={"code": code})
 
     async def remove_promo(self, cart_id: str) -> dict[str, Any]:
-        return await self._request("DELETE", f"/v1/carts/{cart_id}/promotion")
+        return await self._request("DELETE", f"/v1/carts/{segment(cart_id)}/promotion")
 
     async def set_shipping_address(self, cart_id: str, address: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("PUT", f"/v1/carts/{cart_id}/shipping-address", json=address)
+        return await self._request("PUT", f"/v1/carts/{segment(cart_id)}/shipping-address", json=address)
 
     # -- quotes --------------------------------------------------------------------
     async def create_quote(self, cart_id: str, *, idempotency_key: str) -> dict[str, Any]:
-        return await self._request("POST", f"/v1/carts/{cart_id}/quotes", idempotency_key=idempotency_key)
+        return await self._request(
+            "POST", f"/v1/carts/{segment(cart_id)}/quotes", idempotency_key=idempotency_key
+        )
 
     async def get_quote(self, quote_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/quotes/{quote_id}")
+        return await self._request("GET", f"/v1/quotes/{segment(quote_id)}")

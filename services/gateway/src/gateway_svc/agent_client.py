@@ -12,7 +12,7 @@ import httpx
 from httpx_sse import EventSource
 
 from commerce_common.errors import DomainError
-from commerce_common.http import service_client
+from commerce_common.http import segment, service_client
 
 
 class UpstreamError(DomainError):
@@ -57,7 +57,7 @@ class AgentClient:
         if request_id:
             headers["X-Request-Id"] = request_id
         request = self._http.build_request(
-            "POST", f"/v1/conversations/{conversation_id}/turns", json=payload, headers=headers
+            "POST", f"/v1/conversations/{segment(conversation_id)}/turns", json=payload, headers=headers
         )
         try:
             response = await self._http.send(request, stream=True)
@@ -100,7 +100,7 @@ class AgentClient:
 
     async def history(self, conversation_id: str) -> dict[str, Any]:
         try:
-            response = await self._http.get(f"/v1/conversations/{conversation_id}/messages")
+            response = await self._http.get(f"/v1/conversations/{segment(conversation_id)}/messages")
         except httpx.TransportError as exc:
             raise UpstreamError(
                 503, {"code": "assistant_unavailable", "message": "Assistant unavailable"}

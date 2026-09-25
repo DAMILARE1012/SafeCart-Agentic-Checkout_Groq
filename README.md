@@ -72,10 +72,20 @@ stateDiagram-v2
   webhooks and flags mismatches. Orders that need a person trigger an alert (Slack-compatible webhook).
 - **Tamper-evident history.** The audit log is hash-chained, and a database trigger blocks updates and
   deletes. Reconciliation re-verifies the chain.
-- **Guarded input and output.** Llama Prompt Guard screens messages for prompt injection. Replies are
-  checked for prices and addresses that don't come from the backend or the shopper.
+- **Guarded input and output.** Deterministic rules plus Llama Prompt Guard screen messages for prompt
+  injection. Replies are checked against what actually happened: prices, promo codes, and claims such as
+  "added to your cart" or "you've been charged" must be backed by a tool result, and leaked secrets or
+  prompt text are replaced.
 
 The full architecture is in [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md).
+
+## Observability
+
+Two Grafana dashboards are set up automatically (`--profile observability`): business and money, and
+reliability and the agent. Prometheus alert rules cover refund failures, Stripe mismatches, dead letters,
+backlogs, audit-chain tampering and LLM error spikes.
+
+<img src="docs/images/grafana-business.png" alt="Grafana dashboard with paid and refunded volume, refund rate, conversion funnel and order outcomes">
 
 ## Tech stack
 
@@ -87,7 +97,7 @@ The full architecture is in [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md).
 | Data & messaging | PostgreSQL 18 (one database per service), Redis 8, RabbitMQ 4 (quorum queues) via FastStream |
 | Frontend widget | React 19, Redux Toolkit, Tailwind CSS 4, TypeScript, Vite, Shadow DOM web component |
 | Infrastructure | Docker (multi-stage, non-root images), Docker Compose, Traefik 3 |
-| Quality | pytest + Testcontainers, Vitest + MSW, ruff, mypy (strict), GitHub Actions |
+| Quality | pytest + Testcontainers, Hypothesis, Schemathesis, Vitest + MSW, ruff, mypy (strict), GitHub Actions |
 | Observability (optional) | OpenTelemetry, Prometheus, Grafana, Jaeger, structlog |
 
 ## Getting started
@@ -192,10 +202,22 @@ window.CommerceChat.close();
 
 ```bash
 uv sync --all-packages
-uv run pytest                    # Python services (Docker required: Testcontainers starts PostgreSQL)
+uv run pytest                    # unit, property, contract, API-fuzzing and chaos tests (needs Docker)
+uv run pytest evals/offline      # guardrail evals (deterministic, gate CI)
+uv run pytest evals/live         # agent evals on real Groq (reads GROQ_API_KEY)
 uv run ruff check . && uv run mypy libs/common/src services/*/src
-cd widget && npm test            # widget unit tests
+cd widget && npm test && npm run contracts:check
 ```
+
+Against the running stack:
+
+```bash
+python scripts/chaos.py          # pause RabbitMQ, kill workers, stop services mid-flow; check invariants
+FUZZ_EXAMPLES=300 uv run pytest -k api_fuzz   # deeper API fuzzing
+```
+
+If you change an API or event on purpose, regenerate the contract snapshots with
+`uv run python scripts/export_contracts.py` (and `npm run contracts` in `widget/`) and review the diff.
 
 ## Project structure
 
@@ -210,7 +232,9 @@ cd widget && npm test            # widget unit tests
 ├── widget/               Embeddable React chat widget (organised by feature)
 ├── docker/               Shared multi-stage Dockerfile for the Python services
 ├── infra/                Postgres init scripts, observability config
-├── scripts/init_env.py   Generates a ready-to-use .env
+├── contracts/            Published API/event schemas, contract and fuzzing tests
+├── evals/                Offline and live agent evals (datasets, scorecards)
+├── scripts/              init_env.py, chaos.py, export_contracts.py, build_dashboards.py
 └── docs/SYSTEM_DESIGN.md Architecture and design decisions
 ```
 
@@ -224,6 +248,7 @@ All configuration lives in one file, `.env`. [`.env.example`](.env.example) docu
 - [x] Fulfilment over RabbitMQ (transactional outbox / inbox)
 - [x] Automatic Stripe refund when fulfilment fails, with the refund recorded in the audit log
 - [x] Reconciliation against Stripe and alerts (manual review, stuck orders, dead letters, audit tampering)
+- [x] Hardening: guardrails, eval suite in CI, contract tests, API fuzzing, chaos tests, dashboards
 - [ ] Live order updates pushed to the widget (it polls today)
 - [ ] Telegram channel (built, currently disabled)
 

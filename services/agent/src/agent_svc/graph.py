@@ -7,15 +7,18 @@
                                                ├── tool_calls ─→ tools       │
                                                ├── error ──────────────────→ render → END
                                                └─→ output_guard ─ ok ──────→ render
-                                                         └─ bad amounts → agent (once)
+                                                         └─ unverified amounts / claims /
+                                                            promo codes → agent (once)
 
-Every branch is deterministic code except the ``agent`` node (the LLM).
+Every branch is deterministic code except the ``agent`` node (the LLM). input_guard = rules, then the
+Prompt Guard classifier; output_guard also replaces any leaked credential or system prompt.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -37,16 +40,41 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 
 from agent_svc.commerce_client import CommerceError
-from agent_svc.guardrails import strip_amounts, unknown_amounts
+from agent_svc.guardrails import (
+    drop_sentences,
+    injection_signals,
+    invented_codes,
+    leaked_content,
+    strip_amounts,
+    unknown_amounts,
+    unsupported_claims,
+)
 from agent_svc.models import ModelProvider, is_rate_limited
 from agent_svc.prompts import system_prompt
 from agent_svc.settings import AgentSettings
 from agent_svc.state import AgentContext, AgentState, Phase
 from agent_svc.tools import ALL_TOOLS, action_tool_call, amounts_in, money_text, tools_for
+from commerce_common.metrics import counter, histogram, prime_labels
 
 log = structlog.get_logger("agent.graph")
 
 MAX_TOOL_ROUNDS = 4  # after this many tool rounds the model must answer without tools
+
+# Metrics (docs §11). Labels are low-cardinality by design.
+TURNS = prime_labels(
+    counter("agent.turns", "Agent turns by outcome (ok | refused | error)"),
+    [{"outcome": o} for o in ("ok", "refused", "error")],
+)
+GUARDRAIL_TRIGGERS = counter("agent.guardrail.triggers", "Guardrail interventions by guard and action")
+LLM_DURATION = histogram("agent.llm.duration", "LLM call latency (primary or fallback)")
+LLM_TOKENS = counter("agent.llm.tokens", "LLM tokens by model and direction", unit="{token}")
+LLM_ERRORS = prime_labels(
+    counter("agent.llm.errors", "LLM calls that failed after fallback, by kind"),
+    [{"kind": "rate_limited"}, {"kind": "error"}],
+)
+TOOL_CALLS = counter("agent.tool.calls", "Tool executions by tool and result")
+
+LEAK_REPLACEMENT = "Sorry, I can't share that. I can help you find products, manage your cart or check out."
 
 REFUSALS = {
     "prompt_injection": (
@@ -154,6 +182,44 @@ def suggestions_for(phase: str, blocks: list[dict[str, Any]]) -> list[str]:
     return []
 
 
+def turn_evidence(state: AgentState) -> tuple[set[str], str]:
+    """What the reply may rely on: tools that succeeded THIS turn (plus 'cart_discount' when the real cart
+    has one), and the text a promo code may legitimately come from (tool results, customer, cart)."""
+    messages = state.get("messages", [])
+    evidence: set[str] = set()
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, ToolMessage) and message.artifact is not None:
+            evidence.add(str(message.name))
+    cart = state.get("cart_summary", "")
+    if "discount " in cart:
+        evidence.add("cart_discount")
+    known = [str(m.content) for m in messages if isinstance(m, HumanMessage | ToolMessage)]
+    return evidence, " ".join([*known, cart, state.get("user_text", "")])
+
+
+def guard_feedback(amounts: list[str], claims: list[str], codes: list[str]) -> str:
+    """One precise instruction for the single regeneration."""
+    problems: list[str] = []
+    if amounts:
+        problems.append(
+            f"it mentioned {', '.join(amounts)}, which do not appear in tool results or the cart; use only "
+            "amounts exactly as given there, or leave amounts out"
+        )
+    if claims:
+        problems.append(
+            f"it claimed something that did not happen this turn ({', '.join(claims)}); only describe "
+            "actions your tools actually completed, and remember you cannot take payment or issue refunds"
+        )
+    if codes:
+        problems.append(
+            f"it mentioned promo code(s) {', '.join(codes)} that the store never offered; only mention codes "
+            "from tool results or that the customer typed"
+        )
+    return "Your previous draft broke the rules: " + "; ".join(problems) + ". Rewrite it."
+
+
 # ---------------------------------------------------------------------------
 # Graph
 # ---------------------------------------------------------------------------
@@ -161,16 +227,25 @@ def build_graph(
     models: ModelProvider, settings: AgentSettings, checkpointer: BaseCheckpointSaver[Any] | None
 ) -> CompiledStateGraph[AgentState, AgentContext, AgentState, AgentState]:
     async def input_guard(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
-        if not settings.guardrail_input_classifier_enabled or state.get("pending_action"):
+        if state.get("pending_action"):
             return {}  # UI actions carry no free text to screen
+        if signals := injection_signals(state.get("user_text", "")):
+            # Layer 1: unambiguous attack phrasing. Blocked without spending a model call.
+            log.info("input_blocked", category="prompt_injection", rules=signals, layer="rules")
+            GUARDRAIL_TRIGGERS.add(1, {"guard": "input_rules", "action": "refused"})
+            return {"blocked_category": "prompt_injection"}
+        if not settings.guardrail_input_classifier_enabled:
+            return {}
         try:
             verdict = await models.screen(state.get("user_text", ""))
         except Exception as exc:
             # Fail open: the real protection is structural (no tool can move money or set prices).
             log.warning("input_guard_unavailable", error=type(exc).__name__)
+            GUARDRAIL_TRIGGERS.add(1, {"guard": "input_classifier", "action": "unavailable"})
             return {}
         if not verdict.allowed:
-            log.info("input_blocked", category=verdict.category)
+            log.info("input_blocked", category=verdict.category, score=verdict.score, layer="classifier")
+            GUARDRAIL_TRIGGERS.add(1, {"guard": "input_classifier", "action": "refused"})
             return {"blocked_category": verdict.category}
         return {}
 
@@ -234,17 +309,23 @@ def build_graph(
         ]
         if feedback := state.get("guard_feedback"):
             prompt.append(SystemMessage(feedback))
+        started = time.perf_counter()
         try:
             response = await models.chat(tools).ainvoke(prompt)
         except Exception as exc:
             busy = is_rate_limited(exc)
             log.error("llm_failed", error=type(exc).__name__, phase=phase, rate_limited=busy)
+            LLM_ERRORS.add(1, {"kind": "rate_limited" if busy else "error"})
             return {"turn_error": BUSY if busy else UNAVAILABLE}
         usage: dict[str, Any] = dict(response.usage_metadata or {})
+        model = str(response.response_metadata.get("model_name") or "unknown")
+        LLM_DURATION.record(time.perf_counter() - started, {"model": model})
+        LLM_TOKENS.add(int(usage.get("input_tokens") or 0), {"model": model, "direction": "input"})
+        LLM_TOKENS.add(int(usage.get("output_tokens") or 0), {"model": model, "direction": "output"})
         log.info(
             "llm_response",
             phase=phase,
-            model=response.response_metadata.get("model_name"),
+            model=model,
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             tools_offered=[t.name for t in tools],
@@ -269,6 +350,7 @@ def build_graph(
         for result in results:
             artifact = result.artifact if isinstance(result.artifact, dict) else None
             log.info("tool_result", tool=result.name, ok=artifact is not None)
+            TOOL_CALLS.add(1, {"tool": str(result.name), "ok": str(artifact is not None).lower()})
             if artifact is None:
                 continue
             blocks.extend(artifact.get("blocks", []))
@@ -292,29 +374,76 @@ def build_graph(
         }
 
     async def output_guard(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
+        """Checks the draft reply against what actually happened (docs §5.3). Fixable problems get ONE
+        regeneration with precise feedback; anything left is removed deterministically."""
         last = state["messages"][-1]
         text = message_text(last)
-        if not settings.guardrail_output_amount_validation_enabled:
+
+        if leaks := leaked_content(text):  # never regenerate around a leak: replace outright
+            log.error("output_guard_leak", kinds=leaks)
+            GUARDRAIL_TRIGGERS.add(1, {"guard": "output_leak", "action": "replaced"})
+            return {
+                "final_text": LEAK_REPLACEMENT,
+                "messages": [RemoveMessage(id=str(last.id)), AIMessage(content=LEAK_REPLACEMENT)],
+            }
+
+        evidence, known_text = turn_evidence(state)
+        amounts = (
+            unknown_amounts(text, [*state.get("turn_amounts", []), *state.get("known_amounts", [])])
+            if settings.guardrail_output_amount_validation_enabled
+            else []
+        )
+        claims = unsupported_claims(text, evidence)
+        codes = invented_codes(text, known_text)
+        if not (amounts or claims or codes):
             return {"final_text": text}
-        unknown = unknown_amounts(text, [*state.get("turn_amounts", []), *state.get("known_amounts", [])])
-        if not unknown:
-            return {"final_text": text}
-        log.warning("output_guard_violation", amounts=unknown, retries=state.get("guard_retries", 0))
+
+        log.warning(
+            "output_guard_violation",
+            amounts=amounts,
+            claims=claims,
+            codes=codes,
+            retries=state.get("guard_retries", 0),
+        )
         if state.get("guard_retries", 0) < settings.guardrail_max_regenerations:
+            for guard, hit in (
+                ("output_amounts", amounts),
+                ("output_claims", claims),
+                ("output_codes", codes),
+            ):
+                if hit:
+                    GUARDRAIL_TRIGGERS.add(1, {"guard": guard, "action": "regenerated"})
             return {
                 "guard_retries": state.get("guard_retries", 0) + 1,
-                "guard_feedback": (
-                    f"Your previous draft mentioned {', '.join(unknown)}, which do not appear in tool "
-                    "results "
-                    "or the cart. Rewrite it using only amounts exactly as given there, or leave amounts out."
-                ),
+                "guard_feedback": guard_feedback(amounts, claims, codes),
                 "messages": [RemoveMessage(id=str(last.id))],
             }
-        safe = strip_amounts(text, unknown)
+
+        safe = strip_amounts(text, amounts) if amounts else text
+        if claims or codes:
+            safe = drop_sentences(
+                safe,
+                lambda sentence: bool(
+                    unsupported_claims(sentence, evidence) or invented_codes(sentence, known_text)
+                ),
+            ) or ("Here you go." if state.get("turn_blocks") else "Sorry, could you say that another way?")
+        for guard, hit in (("output_amounts", amounts), ("output_claims", claims), ("output_codes", codes)):
+            if hit:
+                GUARDRAIL_TRIGGERS.add(1, {"guard": guard, "action": "removed"})
         return {"final_text": safe, "messages": [RemoveMessage(id=str(last.id)), AIMessage(content=safe)]}
 
     async def render(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
         ctx = runtime.context
+        TURNS.add(
+            1,
+            {
+                "outcome": "error"
+                if state.get("turn_error")
+                else "refused"
+                if state.get("blocked_category")
+                else "ok"
+            },
+        )
         if error := state.get("turn_error"):
             # Roll this turn out of the conversation memory so a retry starts clean
             # (side effects already made are replayed via deterministic idempotency keys).

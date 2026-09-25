@@ -1,0 +1,965 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "GENERATED from widget/src/shared/api/contracts.ts by `npm run contracts`. Do not edit.",
+  "definitions": {
+    "ApiErrorBody": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "AppliedDiscount": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "amount": {
+          "$ref": "#/definitions/Money"
+        }
+      },
+      "required": [
+        "label",
+        "amount"
+      ]
+    },
+    "CartLine": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sku_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "variant_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "unit_price": {
+          "$ref": "#/definitions/Money"
+        },
+        "line_total": {
+          "$ref": "#/definitions/Money"
+        }
+      },
+      "required": [
+        "id",
+        "sku_id",
+        "name",
+        "quantity",
+        "unit_price",
+        "line_total"
+      ]
+    },
+    "CartSnapshot": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CartLine"
+          }
+        },
+        "item_count": {
+          "type": "number"
+        },
+        "subtotal": {
+          "$ref": "#/definitions/Money"
+        },
+        "discounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AppliedDiscount"
+          }
+        },
+        "total_after_discounts": {
+          "$ref": "#/definitions/Money",
+          "description": "subtotal − discounts, before shipping & tax. Computed by the backend, never here."
+        }
+      },
+      "required": [
+        "id",
+        "lines",
+        "item_count",
+        "subtotal",
+        "discounts"
+      ]
+    },
+    "ConfirmCheckoutResponse": {
+      "type": "object",
+      "properties": {
+        "order_id": {
+          "type": "string"
+        },
+        "checkout_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "order_id",
+        "checkout_url"
+      ]
+    },
+    "ConfirmationGrant": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token",
+        "expires_at"
+      ],
+      "description": "Issued by gateway-svc (never by the agent). Single-use, bound to the quote."
+    },
+    "ConversationStreamEvent": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "order.updated"
+            },
+            "data": {
+              "$ref": "#/definitions/OrderSummary"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "notice"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warning",
+                    "error"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "level",
+                "text"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        }
+      ],
+      "description": "SSE events on GET /v1/conversations/{id}/events (server push)"
+    },
+    "CreateSessionRequest": {
+      "type": "object",
+      "properties": {
+        "publishable_key": {
+          "type": "string"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "resume_conversation_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publishable_key",
+        "locale"
+      ]
+    },
+    "HistoryMessage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "user",
+            "assistant",
+            "system"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/UiBlock"
+          }
+        },
+        "suggestions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "text",
+        "blocks",
+        "created_at"
+      ]
+    },
+    "MerchantInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "logo_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "currency"
+      ]
+    },
+    "Money": {
+      "type": "object",
+      "properties": {
+        "amount_minor": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "description": "Wire contracts between the widget and gateway-svc (see docs/SYSTEM_DESIGN.md §6.2 and §17).\n\nRule: the widget NEVER computes money. Every amount is rendered exactly as the backend sends it (integer minor units + ISO-4217 currency)."
+    },
+    "OrderStatus": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "AWAITING_PAYMENT",
+        "PAID",
+        "FULFILLED",
+        "PAYMENT_FAILED",
+        "EXPIRED",
+        "CANCELED",
+        "FULFILLMENT_FAILED",
+        "REFUND_PENDING",
+        "REFUNDED",
+        "MANUAL_REVIEW"
+      ]
+    },
+    "OrderSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/OrderStatus"
+        },
+        "total": {
+          "$ref": "#/definitions/Money"
+        },
+        "checkout_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refund": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "amount": {
+                  "$ref": "#/definitions/Money"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "succeeded",
+                    "failed"
+                  ]
+                }
+              },
+              "required": [
+                "amount",
+                "status"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "total",
+        "updated_at"
+      ]
+    },
+    "ProductSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sku_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "variant_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price": {
+          "$ref": "#/definitions/Money"
+        },
+        "compare_at_price": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "in_stock": {
+          "type": "boolean"
+        },
+        "rating": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "sku_id",
+        "name",
+        "price",
+        "in_stock"
+      ]
+    },
+    "Quote": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/QuoteLine"
+          }
+        },
+        "subtotal": {
+          "$ref": "#/definitions/Money"
+        },
+        "discounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AppliedDiscount"
+          }
+        },
+        "shipping": {
+          "$ref": "#/definitions/Money"
+        },
+        "tax_total": {
+          "$ref": "#/definitions/Money"
+        },
+        "tax_inclusive": {
+          "type": "boolean"
+        },
+        "total": {
+          "$ref": "#/definitions/Money"
+        },
+        "expires_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "lines",
+        "subtotal",
+        "discounts",
+        "shipping",
+        "tax_total",
+        "tax_inclusive",
+        "total",
+        "expires_at"
+      ]
+    },
+    "QuoteLine": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "variant_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "line_total": {
+          "$ref": "#/definitions/Money"
+        }
+      },
+      "required": [
+        "name",
+        "quantity",
+        "line_total"
+      ]
+    },
+    "SessionResponse": {
+      "type": "object",
+      "properties": {
+        "session_token": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "merchant": {
+          "$ref": "#/definitions/MerchantInfo"
+        }
+      },
+      "required": [
+        "session_token",
+        "expires_at",
+        "conversation_id",
+        "merchant"
+      ]
+    },
+    "TurnRequest": {
+      "type": "object",
+      "properties": {
+        "client_message_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/definitions/UserAction"
+        }
+      },
+      "required": [
+        "client_message_id",
+        "text"
+      ]
+    },
+    "TurnStreamEvent": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "turn.started"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "turn_id": {
+                  "type": "string"
+                },
+                "message_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "turn_id",
+                "message_id"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "text.delta"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "delta": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message_id",
+                "delta"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "block"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "block": {
+                  "$ref": "#/definitions/UiBlock"
+                }
+              },
+              "required": [
+                "message_id",
+                "block"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "suggestions"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "suggestions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "message_id",
+                "suggestions"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "turn.completed"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message_id"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "turn.error"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ]
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        }
+      ],
+      "description": "SSE events on POST /v1/conversations/{id}/turns"
+    },
+    "UiBlock": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "product_list"
+            },
+            "products": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ProductSummary"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "products"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "product_card"
+            },
+            "product": {
+              "$ref": "#/definitions/ProductSummary"
+            }
+          },
+          "required": [
+            "type",
+            "product"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cart"
+            },
+            "cart": {
+              "$ref": "#/definitions/CartSnapshot"
+            }
+          },
+          "required": [
+            "type",
+            "cart"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "quote"
+            },
+            "quote": {
+              "$ref": "#/definitions/Quote"
+            },
+            "confirmation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ConfirmationGrant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "quote",
+            "confirmation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "order_status"
+            },
+            "order": {
+              "$ref": "#/definitions/OrderSummary"
+            }
+          },
+          "required": [
+            "type",
+            "order"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "notice"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "level",
+            "text"
+          ]
+        }
+      ]
+    },
+    "UserAction": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "add_to_cart"
+            },
+            "sku_id": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "sku_id",
+            "quantity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "update_cart_item"
+            },
+            "cart_item_id": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "cart_item_id",
+            "quantity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "remove_cart_item"
+            },
+            "cart_item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cart_item_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "view_product"
+            },
+            "product_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "product_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "start_checkout"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "refresh_quote"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ],
+      "description": "Structured intent attached to a user turn when it comes from a UI control (not free text)."
+    }
+  }
+}

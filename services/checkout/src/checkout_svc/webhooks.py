@@ -20,10 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from checkout_svc import audit, orders
 from checkout_svc.models import Order, WebhookEvent
 from checkout_svc.payments import PaymentProvider
+from commerce_common.metrics import counter, histogram
 
 log = structlog.get_logger("checkout.webhooks")
 
 MAX_ATTEMPTS = 8
+WEBHOOKS_RECEIVED = counter("checkout.webhooks.received", "Verified Stripe webhooks by type and duplicate")
+WEBHOOK_LAG = histogram("checkout.webhook.lag", "Time from receiving a Stripe webhook to applying it")
 HANDLED = {
     "checkout.session.completed",
     "checkout.session.async_payment_succeeded",
@@ -54,6 +57,7 @@ async def receive(
             )
         ).first()
     log.info("webhook_received", event_type=event["type"], duplicate=inserted is None)
+    WEBHOOKS_RECEIVED.add(1, {"type": str(event["type"]), "duplicate": str(inserted is None).lower()})
     return inserted is not None
 
 
@@ -88,6 +92,7 @@ async def process_pending(sessions: async_sessionmaker[AsyncSession], batch: int
                 async with session.begin_nested():
                     await apply_event(session, event.payload)
                 event.processed_at = datetime.now(UTC)
+                WEBHOOK_LAG.record((event.processed_at - event.received_at).total_seconds())
                 done += 1
             except Exception as exc:
                 event.attempts += 1
@@ -213,7 +218,7 @@ class _Mover:
                 "webhook_ignored_invalid_transition",
                 order_id=order.id,
                 status=order.status,
-                event=self._event["type"],
+                event_type=self._event["type"],  # not `event=`: that is structlog's message argument
             )
             return
         await orders.transition(

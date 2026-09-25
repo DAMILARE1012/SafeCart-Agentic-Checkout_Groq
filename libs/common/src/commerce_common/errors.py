@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import DBAPIError
 
 log = structlog.get_logger(__name__)
 
@@ -82,8 +83,30 @@ def install_error_handlers(app: FastAPI) -> None:
         )
         return JSONResponse(status_code=422, content=body.model_dump(exclude_none=True))
 
+    @app.exception_handler(DBAPIError)
+    async def _database(_: Request, exc: DBAPIError) -> JSONResponse:
+        # A handler for this specific type, not the catch-all below: Starlette's outermost error middleware
+        # (which serves the catch-all) re-raises after responding, logging a crash for bad client input.
+        if _is_unstorable_text(exc):
+            # Input with characters the database cannot store (e.g. NUL), found by API fuzzing.
+            body = ErrorBody(
+                code="invalid_characters", message="The request contains characters that are not allowed"
+            )
+            return JSONResponse(status_code=400, content=body.model_dump(exclude_none=True))
+        log.exception("database_error", error_type=type(exc.orig).__name__)
+        body = ErrorBody(code="internal_error", message="Unexpected error", retryable=True)
+        return JSONResponse(status_code=500, content=body.model_dump(exclude_none=True))
+
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception) -> JSONResponse:
         log.exception("unhandled_error", error_type=type(exc).__name__)
         body = ErrorBody(code="internal_error", message="Unexpected error", retryable=True)
         return JSONResponse(status_code=500, content=body.model_dump(exclude_none=True))
+
+
+_UNSTORABLE = ("CharacterNotInRepertoireError", "UntranslatableCharacterError", "invalid byte sequence")
+
+
+def _is_unstorable_text(exc: BaseException) -> bool:
+    """PostgreSQL refused a string (found by API fuzzing: a NUL byte in a cart's conversation id)."""
+    return any(marker in f"{type(exc).__name__}: {exc}" for marker in _UNSTORABLE)

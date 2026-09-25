@@ -21,6 +21,8 @@ dev = [
     "testcontainers[postgres]>=4",
     "ruff>=0.12",
     "mypy>=1.17",
+    "jsonschema>=4.25",
+    "schemathesis>=4.1",
 ]
 
 # ---------------------------------------------------------------------------
@@ -44,7 +46,10 @@ known-first-party = ["commerce_common", "commerce_svc", "agent_svc", "gateway_sv
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S105", "S106", "S107", "PT018", "RUF015"] # fake secrets, compact asserts in tests
 "**/migrations/**" = ["E501"]
-"**/seed.py" = ["E501"]   # tabular demo data
+"**/seed.py" = ["E501"]
+# Dev-only chaos harness: drives docker compose with fixed arguments, reads its own .env.
+"scripts/chaos.py" = ["S603", "S607"]
+"scripts/build_dashboards.py" = ["E501"]  # one panel per line reads better than wrapped JSON   # tabular demo data
 
 [tool.mypy]
 python_version = "3.13"
@@ -61,7 +66,7 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["libs", "services"]
+testpaths = ["libs", "services", "contracts"]
 # Each service's test kit has a unique module name, so suites can be collected together.
-pythonpath = ["services/agent/tests", "services/checkout/tests", "services/commerce/tests", "services/fulfillment/tests", "services/gateway/tests"]
+pythonpath = ["contracts", "evals", "services/agent/tests", "services/checkout/tests", "services/commerce/tests", "services/fulfillment/tests", "services/gateway/tests"]
 addopts = "--import-mode=importlib"

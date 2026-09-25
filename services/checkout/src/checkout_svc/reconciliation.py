@@ -31,12 +31,33 @@ from checkout_svc.models import Order, WebhookEvent
 from checkout_svc.payments import PaymentProvider, PaymentRejected, PaymentTemporarilyUnavailable
 from checkout_svc.settings import CheckoutSettings
 from commerce_common.alerts import Alerter
+from commerce_common.metrics import counter, observed, prime_labels
 
 log = structlog.get_logger("checkout.reconciliation")
 
 ACTOR = "reconciler"
 LOCK_KEY = 0x7265636F  # 'reco': one reconciler at a time across worker replicas
 BATCH = 100
+RECONCILED = prime_labels(
+    counter("checkout.reconciliation.fixes", "Missed webhooks applied by reconciliation, by kind"),
+    [{"kind": "payment"}, {"kind": "refund"}],
+)
+MISMATCHES = prime_labels(counter("checkout.reconciliation.mismatches", "Orders that disagree with Stripe"))
+# Results of the latest run, reported on EVERY metrics export (the run itself is every 15 minutes).
+LATEST: dict[str, float] = {}
+observed(
+    "checkout.orders.stuck", "Orders stuck in a state at the last reconciliation", lambda: LATEST.get("stuck")
+)
+observed("events.dead_letters", "Messages in the dead-letter queue", lambda: LATEST.get("dead_letters"))
+observed(
+    "checkout.webhooks.dead", "Stripe webhooks that failed every retry", lambda: LATEST.get("dead_webhooks")
+)
+observed(
+    "checkout.audit.chain_ok",
+    "1 if the audit hash chain verified at the last run",
+    lambda: LATEST.get("chain_ok"),
+    unit="{bool}",
+)
 # Orders whose Stripe payment is final: verified once against the PaymentIntent.
 VERIFIABLE = ("PAID", "FULFILLED", "FULFILLMENT_FAILED", "REFUND_PENDING", "REFUNDED")
 
@@ -111,6 +132,15 @@ class Reconciler:
             finally:
                 await lock_session.execute(select(func.pg_advisory_unlock(LOCK_KEY)))
                 await lock_session.commit()
+        RECONCILED.add(report.payments_recovered, {"kind": "payment"})
+        RECONCILED.add(report.refunds_recovered, {"kind": "refund"})
+        MISMATCHES.add(report.mismatches)
+        LATEST.update(
+            stuck=report.stuck_orders,
+            dead_letters=report.dead_letters,
+            dead_webhooks=report.dead_webhooks,
+            chain_ok=1 if report.audit_chain_ok else 0,
+        )
         log.info("reconciliation_completed", **report.__dict__)
         return report
 

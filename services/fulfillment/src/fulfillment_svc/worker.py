@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from commerce_common import events
 from commerce_common.db import create_engine, create_session_factory
 from commerce_common.messaging import consumer_queue, declare_dead_letter_queue, events_exchange, relay
-from commerce_common.observability import configure_logging
+from commerce_common.observability import configure_logging, setup_worker_telemetry, shutdown_telemetry
 from fulfillment_svc.handler import handle_order_paid
 from fulfillment_svc.models import OUTBOX
 from fulfillment_svc.provider import FulfillmentProvider, build_provider
@@ -55,6 +55,7 @@ def build_broker(
 
 async def run(settings: FulfillmentSettings) -> None:
     engine = create_engine(settings.database_url, pool_size=3, max_overflow=0)
+    setup_worker_telemetry(settings, engine)
     sessions = create_session_factory(engine)
     broker = build_broker(settings, sessions, build_provider(settings))
     exchange = events_exchange(settings.events_exchange)
@@ -99,6 +100,7 @@ async def run(settings: FulfillmentSettings) -> None:
     server.should_exit = True
     await server_task
     await engine.dispose()
+    shutdown_telemetry()
     log.info("worker_stopped")
 
 

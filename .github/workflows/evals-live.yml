@@ -1,0 +1,46 @@
+name: Live evals (Groq)
+
+# The agent against the REAL model: golden conversations, safety cases and the injection classifier.
+# Nightly and on demand (not per push: it spends tokens and waits on the provider's rate limits).
+# Needs the repository secret GROQ_API_KEY; without it the job is skipped, not failed.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: evals-live
+  cancel-in-progress: false
+
+jobs:
+  live-evals:
+    name: Live agent evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      EVAL_PACE_SECONDS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        if: env.GROQ_API_KEY != ''
+      - uses: astral-sh/setup-uv@v10
+        if: env.GROQ_API_KEY != ''
+        with:
+          enable-cache: true
+      - name: Install workspace (locked)
+        if: env.GROQ_API_KEY != ''
+        run: uv sync --all-packages --frozen
+      - name: Live evals (safety must be 100%, quality >= 80%)
+        if: env.GROQ_API_KEY != ''
+        run: uv run pytest evals/live -q
+      - name: Keep eval reports
+        if: always() && env.GROQ_API_KEY != ''
+        uses: actions/upload-artifact@v5
+        with:
+          name: live-eval-reports
+          path: evals/reports/
+          if-no-files-found: ignore
+      - name: Skipped (no GROQ_API_KEY secret)
+        if: env.GROQ_API_KEY == ''
+        run: echo "Add the GROQ_API_KEY repository secret to enable live evals."

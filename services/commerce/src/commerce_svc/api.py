@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from commerce_common.auth import require_scope
 from commerce_common.db import transactional_session
 from commerce_common.errors import ValidationFailed
+from commerce_common.http import PRINTABLE_PATTERN
 from commerce_common.idempotency import fingerprint, idempotency_key_header, run_idempotent
 from commerce_common.money import Money, MoneyDTO
 from commerce_svc.carts import CartService
@@ -113,7 +114,7 @@ catalog = APIRouter(prefix="/v1", tags=["catalog"], dependencies=[READ])
 async def search_products(
     session: Session,
     settings: Settings,
-    q: Annotated[str, Query(max_length=200)] = "",
+    q: Annotated[str, Query(max_length=200, pattern=PRINTABLE_PATTERN)] = "",
     currency: Annotated[str | None, Query(pattern=r"^[A-Za-z]{3}$")] = None,
     limit: Annotated[int, Query(ge=1, le=24)] = 8,
     max_price_minor: Annotated[int | None, Query(ge=0)] = None,

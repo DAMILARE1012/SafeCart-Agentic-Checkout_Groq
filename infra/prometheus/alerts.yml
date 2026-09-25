@@ -1,0 +1,71 @@
+# Prometheus alert rules (docs §11). They complement checkout-svc's own Alerter (order-level, exactly-once
+# alerts to ALERT_WEBHOOK_URL) with trend alerts on the metrics. Wire an Alertmanager to route them.
+groups:
+  - name: money
+    rules:
+      - alert: RefundsRejected
+        expr: increase(checkout_refunds_total{outcome="rejected"}[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: Stripe rejected a compensation refund; the order is in MANUAL_REVIEW.
+      - alert: ReconciliationMismatch
+        expr: increase(checkout_reconciliation_mismatches_total[1h]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: An order disagrees with what Stripe received.
+      - alert: AuditChainBroken
+        expr: checkout_audit_chain_ok == 0
+        labels: { severity: critical }
+        annotations:
+          summary: The audit log hash chain failed verification (possible tampering).
+      - alert: WebhookSignatureFailures
+        expr: increase(checkout_webhooks_rejected_total[10m]) > 5
+        labels: { severity: warning }
+        annotations:
+          summary: Many webhook requests failed Stripe signature checks (forgery or a rotated secret).
+
+  - name: pipeline
+    rules:
+      - alert: DeadLetters
+        expr: max(rabbitmq_queue_messages{queue=~".*dlx.*"}) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Messages are waiting in the dead-letter queue.
+      - alert: DeadWebhooks
+        expr: checkout_webhooks_dead > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Stripe webhooks failed every retry. Fix the cause, then run: python -m checkout_svc.ops retry-dead-webhooks"
+      - alert: OutboxBacklog
+        expr: checkout_outbox_backlog > 20
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Events are not being published (RabbitMQ down or relay stuck).
+      - alert: WebhookBacklog
+        expr: checkout_webhooks_backlog > 20
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Stripe webhooks are piling up unapplied (checkout-worker down or failing).
+      - alert: OrdersStuck
+        expr: checkout_orders_stuck > 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: Orders stuck in a state (fulfilment or refund not progressing).
+
+  - name: agent
+    rules:
+      - alert: LLMErrorSpike
+        expr: sum(rate(agent_llm_errors_total[5m])) / clamp_min(sum(rate(agent_turns_total[5m])), 0.001) > 0.2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 20% of agent turns hit LLM errors (Groq outage or rate limits).
+      - alert: GuardrailInterventionsSpike
+        expr: sum(increase(agent_guardrail_triggers_total{action=~"refused|replaced"}[15m])) > 20
+        labels: { severity: warning }
+        annotations:
+          summary: Unusual volume of refused or replaced replies (possible attack campaign).

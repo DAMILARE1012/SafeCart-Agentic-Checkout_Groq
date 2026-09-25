@@ -22,12 +22,21 @@ jobs:
         run: uv sync --all-packages --frozen
       - name: Ruff (lint + format)
         run: |
-          uv run ruff check libs services
-          uv run ruff format --check libs services
+          uv run ruff check .
+          uv run ruff format --check .
       - name: Mypy (strict)
         run: uv run mypy libs/common/src services/commerce/src services/agent/src services/gateway/src services/checkout/src services/fulfillment/src
-      - name: Tests (unit, property, integration with real Postgres via testcontainers)
+      - name: Tests (unit, property, contract, API fuzzing, chaos; real Postgres via testcontainers)
         run: uv run pytest -q
+      - name: Offline evals (guardrail regression gates)
+        run: uv run pytest evals/offline -q
+      - name: Keep eval reports
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: offline-eval-reports
+          path: evals/reports/
+          if-no-files-found: ignore
 
   widget:
     name: Chat widget (types · tests · build)
@@ -44,6 +53,7 @@ jobs:
           cache-dependency-path: widget/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
+      - run: npm run contracts:check   # widget → gateway contract published and up to date
       - run: npm test
       - run: npx vite build
 

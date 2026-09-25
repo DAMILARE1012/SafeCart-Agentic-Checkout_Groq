@@ -17,9 +17,12 @@ from typing import Any, Literal
 import httpx
 import structlog
 
+from commerce_common.metrics import counter
+
 log = structlog.get_logger("alerts")
 
 Severity = Literal["critical", "warning"]
+ALERTS = counter("alerts.sent", "Operational alerts raised, by kind and severity")
 
 
 class Alerter:
@@ -71,6 +74,9 @@ class Alerter:
                 log.warning("alert_delivery_failed", alert_key=key, error=type(exc).__name__)
                 return False
         self._sent[key] = now
+        parts = key.split(":")
+        kind = f"{parts[0]}:{parts[-1]}" if len(parts) > 2 else key  # drop ids: low cardinality
+        ALERTS.add(1, {"kind": kind, "severity": severity})
         return True
 
     async def aclose(self) -> None:

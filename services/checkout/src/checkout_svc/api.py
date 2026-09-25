@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from checkout_svc import webhooks
@@ -16,17 +16,24 @@ from checkout_svc.payments import InvalidWebhook
 from checkout_svc.service import CheckoutService
 from commerce_common.auth import require_scope
 from commerce_common.errors import BadRequest
+from commerce_common.http import ID_PATTERN
 from commerce_common.idempotency import MAX_KEY_LENGTH
+from commerce_common.metrics import counter, prime_labels
+
+WEBHOOKS_REJECTED = prime_labels(
+    counter("checkout.webhooks.rejected", "Webhook requests that failed signature checks")
+)
 
 CALLER_SCOPES = {
     "gateway-svc": frozenset({"checkout:confirmations:issue", "checkout:confirm", "checkout:orders:read"}),
     "agent-svc": frozenset({"checkout:orders:read"}),  # read-only: the agent can never confirm or pay
 }
-ConversationId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_\-:]+$")]
+ConversationId = Annotated[str, Field(min_length=1, max_length=64, pattern=ID_PATTERN)]
+ResourceId = Annotated[str, Path(min_length=1, max_length=64, pattern=ID_PATTERN)]
 
 
 class IssueConfirmationRequest(BaseModel):
-    quote_id: str = Field(min_length=1, max_length=40)
+    quote_id: str = Field(min_length=1, max_length=40, pattern=ID_PATTERN)
     conversation_id: ConversationId
 
 
@@ -65,9 +72,9 @@ async def confirm(
 
 @internal.get("/v1/orders/{order_id}", dependencies=[Depends(require_scope("checkout:orders:read"))])
 async def get_order(
-    order_id: str,
+    order_id: ResourceId,
     request: Request,
-    conversation_id: Annotated[str | None, Query(max_length=64)] = None,
+    conversation_id: Annotated[str | None, Query(max_length=64, pattern=ID_PATTERN)] = None,
 ) -> dict[str, Any]:
     return await _service(request).get_order(order_id, conversation_id)
 
@@ -76,7 +83,7 @@ async def get_order(
     "/v1/conversations/{conversation_id}/orders",
     dependencies=[Depends(require_scope("checkout:orders:read"))],
 )
-async def conversation_orders(conversation_id: str, request: Request) -> dict[str, Any]:
+async def conversation_orders(conversation_id: ResourceId, request: Request) -> dict[str, Any]:
     return {"orders": await _service(request).conversation_orders(conversation_id)}
 
 
@@ -96,5 +103,6 @@ async def stripe_webhook(
             stripe_signature,
         )
     except InvalidWebhook as exc:
+        WEBHOOKS_REJECTED.add(1)  # forged, replayed or misconfigured secret: worth an alert if it spikes
         raise BadRequest("invalid_signature", "Webhook signature verification failed") from exc
     return {"received": True, "duplicate": not stored}

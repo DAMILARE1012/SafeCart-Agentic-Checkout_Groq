@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from commerce_common.http import service_client
+from commerce_common.http import segment, service_client
 
 
 class CheckoutReader:
@@ -22,7 +22,7 @@ class CheckoutReader:
         await self._http.aclose()
 
     async def latest_order(self, conversation_id: str) -> dict[str, Any] | None:
-        response = await self._http.get(f"/v1/conversations/{conversation_id}/orders")
+        response = await self._http.get(f"/v1/conversations/{segment(conversation_id)}/orders")
         response.raise_for_status()
         orders: list[dict[str, Any]] = response.json().get("orders", [])
         return orders[0] if orders else None

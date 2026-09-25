@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
-from commerce_common.http import service_client
+from commerce_common.http import segment, service_client
 
 
 class CommerceRejected(Exception):
@@ -62,19 +62,19 @@ class CommerceClient:
         return body
 
     async def get_quote(self, quote_id: str) -> dict[str, Any]:
-        return await self._call("GET", f"/v1/quotes/{quote_id}")
+        return await self._call("GET", f"/v1/quotes/{segment(quote_id)}")
 
     async def get_cart(self, cart_id: str) -> dict[str, Any]:
-        return await self._call("GET", f"/v1/carts/{cart_id}")
+        return await self._call("GET", f"/v1/carts/{segment(cart_id)}")
 
     async def lock_quote(self, quote_id: str, order_id: str) -> dict[str, Any]:
-        return await self._call("POST", f"/internal/quotes/{quote_id}/lock", {"order_id": order_id})
+        return await self._call("POST", f"/internal/quotes/{segment(quote_id)}/lock", {"order_id": order_id})
 
     async def commit(self, order_id: str) -> dict[str, Any]:
-        return await self._call("POST", f"/internal/orders/{order_id}/commit")
+        return await self._call("POST", f"/internal/orders/{segment(order_id)}/commit")
 
     async def release(self, order_id: str) -> dict[str, Any]:
-        return await self._call("POST", f"/internal/orders/{order_id}/release")
+        return await self._call("POST", f"/internal/orders/{segment(order_id)}/release")
 
     async def void(self, order_id: str) -> dict[str, Any]:
-        return await self._call("POST", f"/internal/orders/{order_id}/void")
+        return await self._call("POST", f"/internal/orders/{segment(order_id)}/void")

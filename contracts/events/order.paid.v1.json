@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "MoneyDTO": {
+      "description": "Wire format shared by every API and the widget: ``{amount_minor, currency}``.",
+      "properties": {
+        "amount_minor": {
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
+      "title": "MoneyDTO",
+      "type": "object"
+    },
+    "OrderLine": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "quantity": {
+          "minimum": 1,
+          "title": "Quantity",
+          "type": "integer"
+        },
+        "sku_id": {
+          "title": "Sku Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sku_id",
+        "name",
+        "quantity"
+      ],
+      "title": "OrderLine",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "conversation_id": {
+      "title": "Conversation Id",
+      "type": "string"
+    },
+    "lines": {
+      "items": {
+        "$ref": "#/$defs/OrderLine"
+      },
+      "title": "Lines",
+      "type": "array"
+    },
+    "order_id": {
+      "title": "Order Id",
+      "type": "string"
+    },
+    "total": {
+      "$ref": "#/$defs/MoneyDTO"
+    }
+  },
+  "required": [
+    "order_id",
+    "conversation_id",
+    "total",
+    "lines"
+  ],
+  "title": "OrderPaidV1",
+  "type": "object"
+}

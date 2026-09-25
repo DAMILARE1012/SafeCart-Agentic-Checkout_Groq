@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from commerce_common.http import ID_PATTERN, PRINTABLE_PATTERN
 from commerce_common.money import MoneyDTO
 
 
@@ -62,12 +63,12 @@ class PromotionListResponse(_Out):
 # Carts
 # ---------------------------------------------------------------------------
 class CreateCartRequest(BaseModel):
-    conversation_id: str = Field(min_length=1, max_length=64)
+    conversation_id: str = Field(min_length=1, max_length=64, pattern=ID_PATTERN)
     currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
 
 
 class AddItemRequest(BaseModel):
-    sku_id: str = Field(min_length=1, max_length=40)
+    sku_id: str = Field(min_length=1, max_length=40, pattern=ID_PATTERN)
     quantity: int = Field(default=1, ge=1)
 
 
@@ -76,7 +77,9 @@ class UpdateItemRequest(BaseModel):
 
 
 class ApplyPromoRequest(BaseModel):
-    code: str = Field(min_length=1, max_length=40)
+    code: str = Field(
+        min_length=1, max_length=40, pattern=PRINTABLE_PATTERN
+    )  # typos get a friendly 'no such code'
 
 
 class ShippingAddressRequest(BaseModel):

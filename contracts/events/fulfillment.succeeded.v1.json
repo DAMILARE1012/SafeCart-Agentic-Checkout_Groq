@@ -1,0 +1,28 @@
+{
+  "properties": {
+    "carrier": {
+      "title": "Carrier",
+      "type": "string"
+    },
+    "fulfillment_id": {
+      "title": "Fulfillment Id",
+      "type": "string"
+    },
+    "order_id": {
+      "title": "Order Id",
+      "type": "string"
+    },
+    "tracking_number": {
+      "title": "Tracking Number",
+      "type": "string"
+    }
+  },
+  "required": [
+    "order_id",
+    "fulfillment_id",
+    "carrier",
+    "tracking_number"
+  ],
+  "title": "FulfillmentSucceededV1",
+  "type": "object"
+}

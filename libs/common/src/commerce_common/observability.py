@@ -51,27 +51,22 @@ def configure_logging(settings: ServiceSettings) -> None:
     logging.basicConfig(stream=sys.stdout, level=settings.log_level, format="%(message)s", force=True)
 
 
-def setup_telemetry(app: FastAPI, settings: ServiceSettings, engine: AsyncEngine | None = None) -> None:
-    """Exports traces (and metrics) via OTLP to the collector. No-op unless OTEL_ENABLED."""
-    if not settings.otel_enabled:
-        return
-
+def _install_providers(settings: ServiceSettings, component: str | None = None) -> None:
+    """Global tracer (and meter) providers exporting via OTLP to the collector."""
     # Imported lazily: services pay the startup cost only when telemetry is on.
     from opentelemetry import metrics
     from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-    resource = Resource.create(
-        {"service.name": settings.otel_service_name, "deployment.environment": settings.app_env}
-    )
+    attributes = {"service.name": settings.otel_service_name, "deployment.environment": settings.app_env}
+    if component:
+        attributes["service.component"] = component  # api | worker (same service, different process)
+    resource = Resource.create(attributes)
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(
         BatchSpanProcessor(OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint, insecure=True))
@@ -80,11 +75,48 @@ def setup_telemetry(app: FastAPI, settings: ServiceSettings, engine: AsyncEngine
 
     if settings.metrics_enabled:
         reader = PeriodicExportingMetricReader(
-            OTLPMetricExporter(endpoint=settings.otel_exporter_otlp_endpoint, insecure=True)
+            OTLPMetricExporter(endpoint=settings.otel_exporter_otlp_endpoint, insecure=True),
+            export_interval_millis=15_000,  # matches the Prometheus scrape interval
         )
         metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+        from commerce_common.metrics import prime
 
+        prime()  # counters start at 0, so the first real event is visible to increase()
+
+
+def setup_telemetry(app: FastAPI, settings: ServiceSettings, engine: AsyncEngine | None = None) -> None:
+    """API process: providers + FastAPI/httpx/SQLAlchemy instrumentation. No-op unless OTEL_ENABLED."""
+    if not settings.otel_enabled:
+        return
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+    _install_providers(settings, "api")
     FastAPIInstrumentor.instrument_app(app, excluded_urls="health/live,health/ready")
     HTTPXClientInstrumentor().instrument()
     if engine is not None:
         SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine)
+
+
+def setup_worker_telemetry(settings: ServiceSettings, engine: AsyncEngine | None = None) -> None:
+    """Worker process (no FastAPI app): providers + httpx/SQLAlchemy. No-op unless OTEL_ENABLED."""
+    if not settings.otel_enabled:
+        return
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+    _install_providers(settings, "worker")
+    HTTPXClientInstrumentor().instrument()
+    if engine is not None:
+        SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine)
+
+
+def shutdown_telemetry() -> None:
+    """Flush pending spans and metrics before a process exits (workers stop on SIGTERM)."""
+    from opentelemetry import metrics
+
+    for provider in (trace.get_tracer_provider(), metrics.get_meter_provider()):
+        shutdown = getattr(provider, "shutdown", None)
+        if callable(shutdown):
+            shutdown()

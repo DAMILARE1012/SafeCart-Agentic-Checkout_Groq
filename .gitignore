@@ -92,3 +92,6 @@ tmp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Eval reports (regenerated on every run; CI keeps them as artifacts)
+evals/reports/

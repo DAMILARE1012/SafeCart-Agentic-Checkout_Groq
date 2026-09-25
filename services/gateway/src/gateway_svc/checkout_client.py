@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import structlog
 
-from commerce_common.http import service_client
+from commerce_common.http import segment, service_client
 from gateway_svc.agent_client import UpstreamError
 
 log = structlog.get_logger("gateway.checkout")
@@ -58,4 +58,6 @@ class CheckoutClient:
         )
 
     async def order(self, order_id: str, conversation_id: str) -> dict[str, Any]:
-        return await self._call("GET", f"/v1/orders/{order_id}", params={"conversation_id": conversation_id})
+        return await self._call(
+            "GET", f"/v1/orders/{segment(order_id)}", params={"conversation_id": conversation_id}
+        )

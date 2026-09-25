@@ -10,6 +10,7 @@ Idempotent end to end:
 from __future__ import annotations
 
 import secrets
+import time
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,6 +18,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from commerce_common import events
 from commerce_common.messaging import claim, enqueue
+from commerce_common.metrics import counter, histogram, prime_labels
 from fulfillment_svc.models import INBOX, OUTBOX, FulfillmentJob
 from fulfillment_svc.provider import (
     FulfillmentProvider,
@@ -27,6 +29,11 @@ from fulfillment_svc.provider import (
 
 log = structlog.get_logger("fulfillment")
 SOURCE = "fulfillment-svc"
+JOBS = prime_labels(
+    counter("fulfillment.jobs", "Fulfilment outcomes (succeeded | failed)"),
+    [{"status": "succeeded"}, {"status": "failed"}],
+)
+PROVIDER_DURATION = histogram("fulfillment.provider.duration", "Warehouse/3PL call latency incl. retries")
 
 
 async def handle_order_paid(
@@ -46,6 +53,7 @@ async def handle_order_paid(
 
     shipment: Shipment | None = None
     failure: str | None = None
+    started = time.perf_counter()
     try:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(max_retries),
@@ -59,6 +67,7 @@ async def handle_order_paid(
                 )
     except TerminalFulfillmentError as exc:
         failure = str(exc)
+    PROVIDER_DURATION.record(time.perf_counter() - started)
 
     fulfillment_id = f"ful_{secrets.token_hex(10)}"
     async with sessions() as session, session.begin():
@@ -104,5 +113,6 @@ async def handle_order_paid(
             )
         await enqueue(session, OUTBOX, outcome)
     status = "succeeded" if shipment is not None else "failed"
+    JOBS.add(1, {"status": status})
     log.info("fulfillment_" + status, fulfillment_id=fulfillment_id, reason=failure)
     return status

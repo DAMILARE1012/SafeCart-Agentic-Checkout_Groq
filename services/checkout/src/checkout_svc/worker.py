@@ -21,12 +21,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from faststream import AckPolicy
 from faststream.rabbit import RabbitBroker
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from checkout_svc import compensation, settlement, webhooks
 from checkout_svc.commerce_client import CommerceClient
 from checkout_svc.fulfillment_results import handle_fulfillment_result
-from checkout_svc.models import OUTBOX
+from checkout_svc.models import OUTBOX, WebhookEvent
 from checkout_svc.payments import StripePayments
 from checkout_svc.reconciliation import Reconciler, alert_orders_needing_review
 from checkout_svc.settings import CheckoutSettings
@@ -40,7 +41,8 @@ from commerce_common.messaging import (
     queue_depth,
     relay,
 )
-from commerce_common.observability import configure_logging
+from commerce_common.metrics import gauge
+from commerce_common.observability import configure_logging, setup_worker_telemetry, shutdown_telemetry
 
 log = structlog.get_logger("checkout.worker")
 
@@ -48,6 +50,8 @@ TICK_S = 1.0
 STALE_SWEEP_EVERY_S = 30.0
 STALE_AFTER_S = 30.0  # health fails if the loop stops making progress
 RESULTS_QUEUE = "checkout.fulfillment-results"
+OUTBOX_BACKLOG = gauge("checkout.outbox.backlog", "Events staged but not yet published")
+INBOX_BACKLOG = gauge("checkout.webhooks.backlog", "Stripe webhooks received but not yet applied")
 
 
 def build_broker(settings: CheckoutSettings, sessions: async_sessionmaker[AsyncSession]) -> RabbitBroker:
@@ -69,8 +73,29 @@ def build_broker(settings: CheckoutSettings, sessions: async_sessionmaker[AsyncS
     return broker
 
 
+async def record_backlogs(sessions: async_sessionmaker[AsyncSession]) -> None:
+    """Two index-only counts per tick: the earliest signal that something downstream is stuck."""
+    async with sessions() as session:
+        OUTBOX_BACKLOG.set(
+            await session.scalar(
+                select(func.count()).select_from(OUTBOX).where(OUTBOX.c.published_at.is_(None))
+            )
+            or 0
+        )
+        INBOX_BACKLOG.set(
+            await session.scalar(
+                select(func.count())
+                .select_from(WebhookEvent)
+                # Only events still being retried: dead ones (every retry failed) have their own gauge.
+                .where(WebhookEvent.processed_at.is_(None), WebhookEvent.attempts < webhooks.MAX_ATTEMPTS)
+            )
+            or 0
+        )
+
+
 async def run(settings: CheckoutSettings) -> None:
     engine = create_engine(settings.database_url, pool_size=5, max_overflow=0)
+    setup_worker_telemetry(settings, engine)
     sessions = create_session_factory(engine)
     commerce = CommerceClient.create(
         settings.commerce_service_url,
@@ -130,6 +155,7 @@ async def run(settings: CheckoutSettings) -> None:
             requested = await settlement.request_fulfillment(sessions, commerce)
             published = await relay(sessions, OUTBOX, broker, exchange)
             alerted = await alert_orders_needing_review(sessions, alerter)
+            await record_backlogs(sessions)
             if (
                 settings.reconciliation_enabled
                 and time.monotonic() - last_reconciliation > settings.reconciliation_interval_seconds
@@ -165,6 +191,7 @@ async def run(settings: CheckoutSettings) -> None:
     await commerce.aclose()
     await alerter.aclose()
     await engine.dispose()
+    shutdown_telemetry()
     log.info("worker_stopped")
 
 

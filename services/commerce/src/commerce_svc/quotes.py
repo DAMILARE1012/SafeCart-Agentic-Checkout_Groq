@@ -11,6 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from commerce_common.errors import NotFound, ValidationFailed
+from commerce_common.metrics import counter, prime_labels
 from commerce_common.money import MoneyDTO
 from commerce_svc.carts import CartService
 from commerce_svc.models import Cart, Quote, new_id
@@ -63,6 +64,9 @@ def _content(
     }
 
 
+QUOTES_CREATED = prime_labels(counter("commerce.quotes.created", "Order summaries (quotes) issued"))
+
+
 class QuoteService:
     def __init__(self, session: AsyncSession, settings: CommerceSettings, carts: CartService) -> None:
         self._session = session
@@ -72,6 +76,7 @@ class QuoteService:
         self._tax = StaticTaxProvider(session, settings)
 
     async def create(self, cart_id: str) -> QuoteDTO:
+        QUOTES_CREATED.add(1)
         cart = await self._carts.load(cart_id, for_update=True)  # serialise with cart mutations
         if not cart.items:
             raise ValidationFailed("cart_empty", "Add something to the cart before checking out")

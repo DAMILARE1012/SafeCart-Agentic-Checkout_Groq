@@ -9,8 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from checkout_svc import audit
-from checkout_svc.models import Order
+from checkout_svc.models import ORDER_STATUSES, Order
 from commerce_common.errors import Conflict, NotFound
+from commerce_common.metrics import counter, prime_labels
 
 # Allowed transitions. Anything else is rejected, which also makes late/out-of-order webhooks harmless.
 TRANSITIONS: dict[str, frozenset[str]] = {
@@ -35,6 +36,20 @@ SETTLEMENT_ON: dict[str, str] = {
     "EXPIRED": "release",
     "REFUNDED": "void",  # give the promotion use back
 }
+
+
+TRANSITIONS_TOTAL = prime_labels(
+    counter("checkout.order.transitions", "Order state transitions by target state"),
+    [{"to": status} for status in ORDER_STATUSES],
+)
+PAID_AMOUNT = prime_labels(
+    counter("checkout.paid.amount", "Paid order value in minor units, by currency"),
+    [{"currency": c} for c in ("USD", "EUR", "GBP")],
+)
+REFUNDED_AMOUNT = prime_labels(
+    counter("checkout.refunded.amount", "Refunded order value in minor units, by currency"),
+    [{"currency": c} for c in ("USD", "EUR", "GBP")],
+)
 
 
 class InvalidTransition(Conflict):
@@ -85,6 +100,11 @@ async def transition(
     for name, value in fields.items():
         setattr(order, name, value)
     await session.flush()
+    TRANSITIONS_TOTAL.add(1, {"to": to})
+    if to == "PAID":
+        PAID_AMOUNT.add(order.total_minor, {"currency": order.currency})
+    elif to == "REFUNDED":
+        REFUNDED_AMOUNT.add(order.total_minor, {"currency": order.currency})
     await audit.record(
         session,
         actor_type=actor_type,
