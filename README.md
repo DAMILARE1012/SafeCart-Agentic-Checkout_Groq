@@ -26,19 +26,7 @@ running an LLM safely next to real money.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    shopper([Shopper]) --> widget["Chat widget<br/>React · Shadow DOM"]
-    widget -- "HTTPS + SSE" --> gateway["gateway-svc<br/>sessions · rate limits"]
-    gateway -- "chat turns" --> agent["agent-svc<br/>LangGraph + Groq"]
-    agent -- "tool calls" --> commerce["commerce-svc<br/>catalog · carts · pricing · tax"]
-    agent -. "read-only order status" .-> checkout
-    gateway -- "Confirm & pay<br/>(shopper click only)" --> checkout["checkout-svc<br/>orders · payments · audit"]
-    checkout -- "lock quote · commit stock" --> commerce
-    checkout -- "Checkout Session<br/>+ idempotency key" --> stripe[(Stripe)]
-    stripe -- "signed webhooks" --> checkout
-    checkout <-->|"events via RabbitMQ<br/>(outbox / inbox)"| fulfillment["fulfillment-svc<br/>warehouse worker"]
-```
+<img src="docs/images/Safecart-Agentic%20Checkout.png" alt="Architecture: the shopper chats through the widget to the gateway; the agent (LangGraph + Groq) calls commerce tools; Confirm & pay goes to checkout, which creates the Stripe session, receives signed webhooks and hands paid orders to fulfilment over RabbitMQ">
 
 Order status changes only when Stripe or the warehouse reports something, never because the model says so:
 
